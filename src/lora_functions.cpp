@@ -814,6 +814,44 @@ void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
 
                                     addBLEOutBuffer(RcvBuffer, size);
                                 }
+
+                                // Only answers to incoming direct messages that contains "QSL?"
+                                // This is our "High altitude baloon tracker & QSL maker" mode
+                                if ((aprsmsg.msg_payload.indexOf("QSL?") >= 0) && (aprsmsg.msg_last_path_cnt == 1))
+                                {
+                                    struct aprsMessage replymsg;
+                                    initAPRS(replymsg, ':');
+
+                                    // Generate a new message ID
+                                    replymsg.msg_id = ((_GW_ID & 0x3FFFFF) << 10) | (meshcom_settings.node_msgid & 0x3FF);
+                                    
+                                    replymsg.msg_source_path = meshcom_settings.node_call; // From you
+                                    replymsg.msg_destination_path = aprsmsg.msg_source_call; // Back to the sender
+                                    replymsg.msg_destination_call = aprsmsg.msg_source_call;
+                                    
+                                    // Formulate the APRS text string (Max 9 char dest call + : + QSL msg with Position)
+                                    char reply_text[80]; 
+                                    snprintf(reply_text, sizeof(reply_text), "%-9.9s:QSL %.4lf%c %.4lf%c %im", 
+                                            aprsmsg.msg_source_call.c_str(),
+                                            meshcom_settings.node_lat, 
+                                            meshcom_settings.node_lat_c,
+                                            meshcom_settings.node_lon, 
+                                            meshcom_settings.node_lon_c,
+                                            meshcom_settings.node_alt);
+                                            
+                                    replymsg.msg_payload = reply_text;
+
+                                    // Advance message ID
+                                    meshcom_settings.node_msgid = (meshcom_settings.node_msgid + 1) % 1000;
+                                    save_settings();
+                                    // Encode and push to the transmission ringbuffer
+                                    uint8_t msg_buffer[MAX_MSG_LEN_PHONE];
+                                    encodeAPRS(msg_buffer, replymsg);
+                                    ringBuffer[iWrite][0] = replymsg.msg_len;
+                                    ringBuffer[iWrite][1] = 0xFF; // 0xFF for no retransmission
+                                    memcpy(ringBuffer[iWrite]+2, msg_buffer, replymsg.msg_len);
+                                    addTxRingEntry("auto_reply");
+                                }
                             }
                             else
                             {
