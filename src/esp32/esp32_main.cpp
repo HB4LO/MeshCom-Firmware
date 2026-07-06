@@ -596,6 +596,10 @@ float getTempForNTC()
 //=======================================================================================
 
 
+#if defined(ENABLE_OPENLOG)
+extern void initOpenLog();
+#endif
+
 void esp32setup()
 {
     ///< Initialize T5-EPAPER GUI
@@ -1103,6 +1107,10 @@ void esp32setup()
     #endif
 
     init_onebutton();
+
+    #if defined(ENABLE_OPENLOG)
+    initOpenLog();
+    #endif
 
     printfdeb("[INIT].._GW_ID: %08X\n", _GW_ID);
 

@@ -205,5 +205,17 @@
 
 // common for all Boards:
 
+// OpenLog Module Configuration
+#define ENABLE_OPENLOG                      // Toggle to enable/disable OpenLog
+#ifndef OPENLOG_TX_PIN
+#define OPENLOG_TX_PIN 13                   // ESP32 TX pin connected to OpenLog RX
+#endif
+#ifndef OPENLOG_RX_PIN
+#define OPENLOG_RX_PIN 25                   // ESP32 RX pin connected to OpenLog TX
+#endif
+#ifndef OPENLOG_BAUD
+#define OPENLOG_BAUD 9600                   // OpenLog default baud rate is 9600 bps
+#endif
+
 // OLED
 #define SSD1306_ADDRESS 0x3C

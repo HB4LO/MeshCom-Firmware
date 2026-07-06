@@ -29,4 +29,10 @@ void csma_reset(void);
 uint8_t getMessagePriority(int slot);
 int getNextTxSlot(void);
 
+#if defined(ESP32) && defined(ENABLE_OPENLOG)
+#include <HardwareSerial.h>
+extern HardwareSerial OpenLogSerial;
+void initOpenLog();
+#endif
+
 #endif

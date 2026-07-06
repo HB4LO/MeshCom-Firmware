@@ -796,6 +796,10 @@ void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
 
                                     queueDisplayText(aprsmsg, rssi, snr);
 
+                                    #if defined(ESP32) && defined(ENABLE_OPENLOG)
+                                    OpenLogSerial.printf("[%s %s] [RX] %s -> %s: %s\n", getDateString().c_str(), getTimeString().c_str(), aprsmsg.msg_source_call.c_str(), aprsmsg.msg_destination_call.c_str(), aprsmsg.msg_payload.c_str());
+                                    #endif
+
                                     if(bDisplayVia)
                                         printfdeb("[MESHx]...SRC-PATH:%s ... DST-PATH:%s TEXT:%s\n", aprsmsg.msg_source_path.c_str(), aprsmsg.msg_destination_path.c_str(), aprsmsg.msg_payload.c_str());
 
@@ -808,6 +812,10 @@ void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
                                     // next sequence to send incomming DM-Message to Display and/or APP via BLE
                                     //
                                     queueDisplayText(aprsmsg, rssi, snr);
+
+                                    #if defined(ESP32) && defined(ENABLE_OPENLOG)
+                                    OpenLogSerial.printf("[%s %s] [RX] %s -> %s: %s\n", getDateString().c_str(), getTimeString().c_str(), aprsmsg.msg_source_call.c_str(), aprsmsg.msg_destination_call.c_str(), aprsmsg.msg_payload.c_str());
+                                    #endif
 
                                     if(bDisplayVia)
                                         printfdeb("[MESHx]...SRC-PATH:%s ... DST-PATH:%s TEXT:%s\n", aprsmsg.msg_source_path.c_str(), aprsmsg.msg_destination_path.c_str(), aprsmsg.msg_payload.c_str());
@@ -1785,6 +1793,13 @@ bool doTX()
                 {
                     tx_is_active = true;
 
+                    #if defined(ESP32) && defined(ENABLE_OPENLOG)
+                    if (lora_tx_buffer[0] == MSG_TYPE_TEXT)
+                    {
+                        OpenLogSerial.printf("[%s %s] [TX] %s -> %s: %s\n", getDateString().c_str(), getTimeString().c_str(), aprsmsg.msg_source_call.c_str(), aprsmsg.msg_destination_call.c_str(), aprsmsg.msg_payload.c_str());
+                    }
+                    #endif
+
                     // you can transmit C-string or Arduino string up to
                     // 256 characters long
                     #if defined BOARD_RAK4630
@@ -2088,3 +2103,13 @@ void csma_reset(void) {
     cad_attempt = 0;
     csma_timeout = csma_compute_timeout(0);
 }
+
+#if defined(ESP32) && defined(ENABLE_OPENLOG)
+HardwareSerial OpenLogSerial(2);
+
+void initOpenLog() {
+    OpenLogSerial.begin(OPENLOG_BAUD, SERIAL_8N1, OPENLOG_RX_PIN, OPENLOG_TX_PIN);
+    delay(100);
+    OpenLogSerial.println("\n--- MeshCom OpenLog Started ---");
+}
+#endif
