@@ -1138,7 +1138,16 @@ uint16_t encodeLoRaAPRS(uint8_t msg_buffer[UDP_TX_BUF_SIZE], char cSourceCall[10
     msg_buffer[1]=0xFF;
     msg_buffer[2]=0x01;
 
-    snprintf(msg_start, sizeof(msg_start), "%s>APLT00-1,WIDE1-1:!%07.2lf%c%c%08.2lf%c%c%s", cSourceCall, slat, lat_c, meshcom_settings.node_symid, slon, lon_c, meshcom_settings.node_symcd, meshcom_settings.node_atxt);
+    String strtmp = meshcom_settings.node_atxt;
+    strtmp.trim();
+    if (alt != 0)
+    {
+        char calt[16];
+        snprintf(calt, sizeof(calt), "/A=%06i", conv_fuss(alt));
+        strtmp.concat(calt);
+    }
+
+    snprintf(msg_start, sizeof(msg_start), "%s>APLT00-1,WIDE1-1:!%07.2lf%c%c%08.2lf%c%c%s", cSourceCall, slat, lat_c, meshcom_settings.node_symid, slon, lon_c, meshcom_settings.node_symcd, strtmp.c_str());
 
     ilng = strlen(msg_start) + 3;
 
@@ -1243,6 +1252,13 @@ uint16_t encodeLoRaAPRScompressed(uint8_t msg_buffer[UDP_TX_BUF_SIZE], char cSou
     strtmp.trim();
     if(strtmp.length() > 16)
         strtmp = strtmp.substring(0, 16);
+
+    if (alt != 0)
+    {
+        char calt[16];
+        snprintf(calt, sizeof(calt), "/A=%06i", conv_fuss(alt));
+        strtmp.concat(calt);
+    }
 
     snprintf(msg_start, sizeof(msg_start), "%s>%s:!%c%c%c%c%c%c%c%c%c%c P[%s", cSourceCall, meshcom_settings.node_aprsmc, meshcom_settings.node_symid, clat[0], clat[1], clat[2], clat[3], clon[0], clon[1], clon[2], clon[3], meshcom_settings.node_symcd, strtmp.c_str());
 

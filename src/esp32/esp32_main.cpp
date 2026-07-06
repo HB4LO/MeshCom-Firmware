@@ -965,6 +965,9 @@ void esp32setup()
 
     posinfo_interval = POSINFO_INTERVAL;
 
+    if(meshcom_settings.node_postime > 60)
+        meshcom_settings.node_postime = 60;
+
     if(meshcom_settings.node_postime > 0)
         posinfo_interval = meshcom_settings.node_postime;
 

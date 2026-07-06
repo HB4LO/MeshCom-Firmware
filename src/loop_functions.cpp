@@ -4348,7 +4348,7 @@ unsigned int setSMartBeaconing(double dlat, double dlon)
     {
         if(distance < 100)
         {
-            posinfo_last_rate = POSINFO_INTERVAL;
+            posinfo_last_rate = posinfo_interval;
 
             if(iGPSDEBUG > 0)
                 printfdeb("%s [POSINFO]...STATIONARY (Speed %.1f, Dist %.0f) --> RATE:%i\n", getTimeString().c_str(), speed_mps, distance, (int)posinfo_last_rate);
@@ -4416,13 +4416,13 @@ unsigned int setSMartBeaconing(double dlat, double dlon)
     if(WiFi.status() == WL_CONNECTED && speed_mps < 1.0)
     {
         // Relax update rate significantly if on WiFi and not moving
-        gps_send_rate = POSINFO_INTERVAL; // 30 minutes
+        gps_send_rate = posinfo_interval; // 1 minute
         
         // Also suppress distance triggers unless very large (e.g. moving to another building)
         if(distance < 200.0) 
         {
-            if(iGPSDEBUG > 0) printfdeb("%s [POSINFO]...WiFi connected & Stationary -> Suppressing drift (Rate: %i)\n", getTimeString().c_str(), POSINFO_INTERVAL);
-            return POSINFO_INTERVAL;
+            if(iGPSDEBUG > 0) printfdeb("%s [POSINFO]...WiFi connected & Stationary -> Suppressing drift (Rate: %i)\n", getTimeString().c_str(), (int)posinfo_interval);
+            return posinfo_interval;
         }
     }
     #endif

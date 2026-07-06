@@ -356,10 +356,10 @@ void commandAction(char *umsg_text, bool ble)
     {
         sscanf(msg_text+10, "%d", &meshcom_settings.node_postime);
 
-        // minimum 3 Minuten
-        if(meshcom_settings.node_postime < (5 * 60))
-            meshcom_settings.node_postime = (5 * 60);
-        else
+        // enforce maximum of 60 seconds (1 minute)
+        if(meshcom_settings.node_postime > 60)
+            meshcom_settings.node_postime = 60;
+        else if(meshcom_settings.node_postime < 0)
             meshcom_settings.node_postime = 0;
 
         if(meshcom_settings.node_postime > 0)
