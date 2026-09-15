@@ -48,6 +48,14 @@
 
 #define DEFAULT_PREAMPLE_LENGTH 32
 
+// Drop GPIO pin definitions (GPIO 33 for $DROP_P, GPIO 32 for $DROP_B)
+#if !defined(GPIO_DROP_P)
+#define GPIO_DROP_P 15
+#endif
+#if !defined(GPIO_DROP_B)
+#define GPIO_DROP_B 2
+#endif
+
 // Meshcom Params
 #define LONGNAME_MAXLEN 20 // maximum length of the longname
 #define TX_ENABLE 1        // switch to en/disable LoRa TX

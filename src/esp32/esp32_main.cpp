@@ -692,6 +692,15 @@ void esp32setup()
     #endif
     //======================================================
 
+    #if defined(GPIO_DROP_P)
+        pinMode(GPIO_DROP_P, OUTPUT);
+        digitalWrite(GPIO_DROP_P, HIGH);
+    #endif
+    #if defined(GPIO_DROP_B)
+        pinMode(GPIO_DROP_B, OUTPUT);
+        digitalWrite(GPIO_DROP_B, HIGH);
+    #endif
+
     printlndeb("");
     printlndeb("");
     printlndeb("============");

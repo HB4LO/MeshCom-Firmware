@@ -294,7 +294,9 @@ void stopNetConsole()
 
     // stop
     if(s_listen_fd >= 0)
+    {
         ::close(s_listen_fd); s_listen_fd = -1;
+    }
 
     teardownClient();
 

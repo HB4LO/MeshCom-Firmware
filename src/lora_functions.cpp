@@ -860,6 +860,74 @@ void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
                                     memcpy(ringBuffer[iWrite]+2, msg_buffer, replymsg.msg_len);
                                     addTxRingEntry("auto_reply");
                                 }
+                                else if (aprsmsg.msg_payload.indexOf("$P_DROP") >= 0)
+                                {
+                                    #if defined(GPIO_DROP_P)
+                                    pinMode(GPIO_DROP_P, OUTPUT);
+                                    digitalWrite(GPIO_DROP_P, LOW);
+                                    printfdeb("[DROP] $P_DROP triggered -> GPIO %d set to LOW (0V)\n", GPIO_DROP_P);
+                                    #endif
+
+                                    struct aprsMessage replymsg;
+                                    initAPRS(replymsg, ':');
+
+                                    // Generate a new message ID
+                                    replymsg.msg_id = ((_GW_ID & 0x3FFFFF) << 10) | (meshcom_settings.node_msgid & 0x3FF);
+                                    
+                                    replymsg.msg_source_path = meshcom_settings.node_call; // From you
+                                    replymsg.msg_destination_path = aprsmsg.msg_source_call; // Back to the sender
+                                    replymsg.msg_destination_call = aprsmsg.msg_source_call;
+                                    
+                                    char reply_text[80]; 
+                                    snprintf(reply_text, sizeof(reply_text), "%-9.9s:$P_DROP OK", aprsmsg.msg_source_call.c_str());
+                                    replymsg.msg_payload = reply_text;
+
+                                    // Advance message ID
+                                    meshcom_settings.node_msgid = (meshcom_settings.node_msgid + 1) % 1000;
+                                    save_settings();
+
+                                    // Encode and push to the transmission ringbuffer
+                                    uint8_t msg_buffer[MAX_MSG_LEN_PHONE];
+                                    encodeAPRS(msg_buffer, replymsg);
+                                    ringBuffer[iWrite][0] = replymsg.msg_len;
+                                    ringBuffer[iWrite][1] = 0xFF; // 0xFF for no retransmission
+                                    memcpy(ringBuffer[iWrite]+2, msg_buffer, replymsg.msg_len);
+                                    addTxRingEntry("auto_reply");
+                                }
+                                else if (aprsmsg.msg_payload.indexOf("$DROP_B") >= 0)
+                                {
+                                    #if defined(GPIO_DROP_B)
+                                    pinMode(GPIO_DROP_B, OUTPUT);
+                                    digitalWrite(GPIO_DROP_B, LOW);
+                                    printfdeb("[DROP] $DROP_B triggered -> GPIO %d set to LOW (0V)\n", GPIO_DROP_B);
+                                    #endif
+
+                                    struct aprsMessage replymsg;
+                                    initAPRS(replymsg, ':');
+
+                                    // Generate a new message ID
+                                    replymsg.msg_id = ((_GW_ID & 0x3FFFFF) << 10) | (meshcom_settings.node_msgid & 0x3FF);
+                                    
+                                    replymsg.msg_source_path = meshcom_settings.node_call; // From you
+                                    replymsg.msg_destination_path = aprsmsg.msg_source_call; // Back to the sender
+                                    replymsg.msg_destination_call = aprsmsg.msg_source_call;
+                                    
+                                    char reply_text[80]; 
+                                    snprintf(reply_text, sizeof(reply_text), "%-9.9s:$DROP_B OK", aprsmsg.msg_source_call.c_str());
+                                    replymsg.msg_payload = reply_text;
+
+                                    // Advance message ID
+                                    meshcom_settings.node_msgid = (meshcom_settings.node_msgid + 1) % 1000;
+                                    save_settings();
+
+                                    // Encode and push to the transmission ringbuffer
+                                    uint8_t msg_buffer[MAX_MSG_LEN_PHONE];
+                                    encodeAPRS(msg_buffer, replymsg);
+                                    ringBuffer[iWrite][0] = replymsg.msg_len;
+                                    ringBuffer[iWrite][1] = 0xFF; // 0xFF for no retransmission
+                                    memcpy(ringBuffer[iWrite]+2, msg_buffer, replymsg.msg_len);
+                                    addTxRingEntry("auto_reply");
+                                }
                             }
                             else
                             {
