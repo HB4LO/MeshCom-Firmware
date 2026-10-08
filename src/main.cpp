@@ -101,6 +101,10 @@ void loop()
     esp32loop();
   #endif
 
+  #if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+    hab_loop();
+  #endif
+
   // Rohframe-Mitschnitt ausgeben. Die Erfassung sitzt im Radio-Callback bzw.
   // zwischen CAD und startTransmit() und darf dort nicht drucken; hier ist
   // Loop-Kontext. Ein Frame je Durchlauf, siehe capture_functions.h.

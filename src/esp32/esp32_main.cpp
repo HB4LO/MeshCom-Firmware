@@ -2054,6 +2054,10 @@ void esp32setup()
     // überwachen war nie Sinn der Maßnahme -- sie hätte diagnostizierbare
     // Hänger in einen anonymen Boot-Loop verwandelt. Bewacht wird ab jetzt
     // ausschließlich esp32loop(), das sich in :esp32loop() selbst füttert.
+    #if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+    hab_setup();
+    #endif
+
     esp_task_wdt_add(NULL);
 }
 

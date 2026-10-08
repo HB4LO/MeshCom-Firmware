@@ -274,7 +274,13 @@ static inline bool flashLayoutCompatible(int stored)
 //#define SEE_ALL_PACKETS 0                  // switch to filter multiple receives of same packets from neighbours rebroadcasted
 #define UDP_MSG_INDICATOR_LEN 4            // the first n bytes to recognize which incoming message we have (GATE, CONF)
 #define HEARTBEAT_INTERVAL 30              // HB interval in seconds
+#include "hab_balloon.h"
+
+#if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+#define POSINFO_INTERVAL 1 * 60            // HAB: POSINFO interval default 1 minute
+#else
 #define POSINFO_INTERVAL 30 * 60           // POSINFO interval in minutes default 30 minutes
+#endif
 #define HEYINFO_INTERVAL 15 * 60           // HEYINFO interval in minutes default 15 minutes
 #define TELEMETRY_INTERVAL 30 * 60         // TELEMETRY interval in minutes default 30 minutes
 #define PING_INTERVAL 60                   // PING interval in seconds default 60 seconds

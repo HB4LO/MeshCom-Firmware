@@ -1208,11 +1208,20 @@ uint16_t encodeLoRaAPRS(uint8_t msg_buffer[UDP_TX_BUF_SIZE], char cSourceCall[10
     // boundary at the same 25-byte cap decodeAPRSPOS() applies on receive
     // (aprs_functions.cpp:632), so a receiver's byte-counting parser never
     // inherits a split multi-byte sequence.
-    char catxt[sizeof(meshcom_settings.node_atxt)];
+    char catxt[64];
     snprintf(catxt, sizeof(catxt), "%s", meshcom_settings.node_atxt);
     size_t iatxt = charset_filter_apply(catxt, strlen(catxt), CHARSET_FILTER_STRIP_SEPARATORS);
     iatxt = charset_utf8_safe_truncate(catxt, iatxt, 25);
     catxt[iatxt] = 0x00;
+
+#if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+    if (alt != 0)
+    {
+        char calt[16];
+        snprintf(calt, sizeof(calt), "/A=%06i", conv_fuss(alt));
+        strncat(catxt, calt, sizeof(catxt) - strlen(catxt) - 1);
+    }
+#endif
 
     snprintf(msg_start, sizeof(msg_start), "%s>APLT00-1,WIDE1-1:!%07.2lf%c%c%08.2lf%c%c%s", cSourceCall, slat, lat_c, meshcom_settings.node_symid, slon, lon_c, meshcom_settings.node_symcd, catxt);
 
@@ -1322,11 +1331,20 @@ uint16_t encodeLoRaAPRScompressed(uint8_t msg_buffer[UDP_TX_BUF_SIZE], char cSou
     // CHR-02: strip APRS structure separators and truncate on a UTF-8
     // boundary -- replaces the previous byte-blind substring(0,16), which
     // could cut a multi-byte sequence in half.
-    char catxt[sizeof(meshcom_settings.node_atxt)];
+    char catxt[64];
     snprintf(catxt, sizeof(catxt), "%s", strtmp.c_str());
     size_t iatxt = charset_filter_apply(catxt, strlen(catxt), CHARSET_FILTER_STRIP_SEPARATORS);
     iatxt = charset_utf8_safe_truncate(catxt, iatxt, 16);
     catxt[iatxt] = 0x00;
+
+#if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+    if (alt != 0)
+    {
+        char calt[16];
+        snprintf(calt, sizeof(calt), "/A=%06i", conv_fuss(alt));
+        strncat(catxt, calt, sizeof(catxt) - strlen(catxt) - 1);
+    }
+#endif
 
     // WIDE1-1 wie in encodeLoRaAPRS()/encodeLoRaAPRSText(): LoRa-APRS-Digipeater
     // wiederholen nur Frames mit diesem Alias (#1174).

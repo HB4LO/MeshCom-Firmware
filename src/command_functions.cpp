@@ -823,9 +823,17 @@ void commandAction(char *umsg_text, bool ble)
     {
         sscanf(msg_text+10, "%d", &meshcom_settings.node_postime);
 
+#if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+        // HAB Mode: fast beaconing (clamp to max 60s instead of min 5 min)
+        if(meshcom_settings.node_postime > HAB_MAX_POSTIME_SEC)
+            meshcom_settings.node_postime = HAB_MAX_POSTIME_SEC;
+        else if(meshcom_settings.node_postime < 0)
+            meshcom_settings.node_postime = 0;
+#else
         // minimum 3 Minuten
         if(meshcom_settings.node_postime < (5 * 60))
             meshcom_settings.node_postime = (5 * 60);
+#endif
 
         // one day at most: the settings schema row (config_json.h) ends there, a
         // larger value would be clamped to it silently on the next boot

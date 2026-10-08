@@ -1778,6 +1778,11 @@ void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
 
                                             queueDisplayText(aprsmsg, rssi, snr);
 
+                                            #if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+                                            hab_log_rx(aprsmsg);
+                                            hab_handle_rx_message(aprsmsg);
+                                            #endif
+
                                             if(bDisplayVia)
                                                 printfdeb("[MESHx]...SRC-PATH:%s ... DST-PATH:%s TEXT:%s\n", aprsmsg.msg_source_path, aprsmsg.msg_destination_path, aprsmsg.msg_payload);
 
@@ -1791,6 +1796,11 @@ void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
                                         // next sequence to send incomming DM-Message to Display and/or APP via BLE
                                         //
                                         queueDisplayText(aprsmsg, rssi, snr);
+
+                                        #if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+                                        hab_log_rx(aprsmsg);
+                                        hab_handle_rx_message(aprsmsg);
+                                        #endif
 
                                         if(bDisplayVia)
                                             printfdeb("[MESHx]...SRC-PATH:%s ... DST-PATH:%s TEXT:%s\n", aprsmsg.msg_source_path, aprsmsg.msg_destination_path, aprsmsg.msg_payload);
@@ -2879,6 +2889,10 @@ bool doTX()
                 if(msg_type_b_lora != 0x00) // 0x41 ACK
                 {
                     tx_is_active = true;
+
+                #if defined(ENABLE_HAB_MODE) && (ENABLE_HAB_MODE == 1)
+                    hab_log_tx(msg_type_b_lora, aprsmsg);
+                #endif
 
                     // you can transmit C-string or Arduino string up to
                     // 256 characters long
