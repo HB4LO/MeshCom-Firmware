@@ -18,7 +18,7 @@ All commands are received via direct APRS text messages:
 
 | Command | Condition | Response Payload | Action |
 | :--- | :--- | :--- | :--- |
-| **`QSL?`** | Direct contact (`1 hop`) | `:<CALL>:QSL <lat><lat_c> <lon><lon_c> <alt>m` | Confirms 2-way contact with current coordinates and altitude. |
+| **`QSL?`** or **`QSL`** *(case-insensitive)* | Direct contact (`hops <= 1`) | `:<CALL>:QSL <lat><lat_c> <lon><lon_c> <alt>m` | Confirms 2-way contact with current coordinates and altitude. |
 | **`$P_DROP`** | Authorized callsign in whitelist | `:<CALL>:$P_DROP OK <lat><lat_c> <lon><lon_c> <alt>m` | Triggers Primary/Parachute cutdown (`GPIO_DROP_P`). |
 | **`$DROP_B`** | Authorized callsign in whitelist | `:<CALL>:$DROP_B OK <lat><lat_c> <lon><lon_c> <alt>m` | Triggers Secondary/Balloon cutdown (`GPIO_DROP_B`). |
 | **`$P_DROP` / `$DROP_B`** | Unauthorized sender | `:<CALL>:<CMD> REJECTED` | Cutdown is refused; security alert logged. |
@@ -326,10 +326,10 @@ All parameters are configured in [`src/hab_balloon.h`](file:///c:/Users/Zappvion
 | `HAB_DROP_ACTIVE_LEVEL` | `LOW` | Pin output level when triggered (`LOW` or `HIGH`) |
 | `HAB_DROP_IDLE_LEVEL` | `HIGH` | Pin output level when idle |
 | `HAB_DROP_PULSE_MS` | `5000` | Pulse duration in milliseconds before returning to idle. Set to `0` to latch permanently. |
-| `HAB_AUTHORIZED_CALLS` | `{"HB4LO", "HB4LO-97", ...}` | Whitelist of calls allowed to trigger cutdown. Matches full call or base call (without SSID). If empty `{}`: allows all. |
-| `HAB_QSL_DIRECT_ONLY` | `1` | Only reply to `QSL?` if heard directly (`msg_last_path_cnt == 1`) without digipeaters |
+| `HAB_AUTHORIZED_CALLS` | `{"HB9HIZ-1", "HB9FOU-62"}` | Whitelist of calls allowed to trigger cutdown. Matches full call or base call (without SSID). If empty `{}`: allows all. |
+| `HAB_QSL_DIRECT_ONLY` | `1` | Only reply to `QSL?`/`QSL` if heard directly (`hops <= 1`) without digipeaters |
 | `HAB_MAX_POSTIME_SEC` | `60` | Maximum beacon interval clamp for balloons (seconds) |
-| `HAB_DEFAULT_CALLSIGN` | `"HB4LO-97"` | Default callsign assigned if node is unconfigured at boot |
+| `HAB_DEFAULT_CALLSIGN` | `"HB4LO-8"` | Default callsign assigned if node is unconfigured at boot |
 | `ENABLE_OPENLOG` | `1` | Enable OpenLog serial blackbox logger |
 | `OPENLOG_TX_PIN` | `13` | ESP32 TX pin connected to OpenLog RX |
 | `OPENLOG_RX_PIN` | `25` | ESP32 RX pin connected to OpenLog TX |
