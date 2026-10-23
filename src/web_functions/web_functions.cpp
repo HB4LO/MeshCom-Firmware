@@ -30,6 +30,7 @@
 #include <TinyGPSPlus.h>       // DIST auf der MHeard-Seite -- reine distanceBetween()-Rechnung, kein GPS-Modul noetig
 #include "sto_notice.h"        // stage 4: stoHolder() for the messages-page held mark, all boards
 #include "own_msg_status.h" // durable per-message delivery state for the messages-page tick
+#include "watchdog_feed.h"  // meshcom_wdt_feed(): neighbour matrix rows run in the WDT-guarded loop task
 #include <url_decode.h>         // #1173: decodeURLPercentCoding() -- full percent-decoding of WebUI parameters
 #include <charset_filter.h>     // #1173: UTF-8-safe cut of the 150-byte web message
 #include "clock.h"              // TZ-01: tzActiveAbbrev() -- flags an unparsable node_tz on the info page
@@ -42,6 +43,11 @@
 #include "web_nodefunctioncalls.h"
 #include "web_commonServer.h"
 #include "gw_link_status.h"
+#include "gw_servers.h"
+#if defined(NRF52_SERIES)
+#include <RAK13800_W5100S.h> // IPAddress for nrf_eth.h
+#include <nrf_eth.h>          // ethIsStaticConfigured()
+#endif
 #if defined(BOARD_RAK4630)
 #include "w5100.h"          // #1183: W5100.readSn*/writeSnMSSR for the web socket's MSS
 #endif
@@ -1412,18 +1418,58 @@ static String urlEncode(const char *input)
  */
 static String getEffectiveNtpServer()
 {
-    if (strlen(meshcom_settings.node_ownntp) >= 7)
-        return String(meshcom_settings.node_ownntp);
-
+    // nRF52 STATIC-IP node: the path uses the configured node_ownip and the legacy rule for the
+    // stored mode 0 (44er -> Hamnet); gwEffectiveMode keeps this status equal to that path.
+    bool staticLegacy = false;
+    const char *webNtpIpText = meshcom_settings.node_ip;
+#if defined(NRF52_SERIES)
+    if (ethIsStaticConfigured())
+    {
+        staticLegacy = true;
+        webNtpIpText = meshcom_settings.node_ownip;
+    }
+#endif
     IPAddress webNtpIp;
-    webNtpIp.fromString(meshcom_settings.node_ip);
+    webNtpIp.fromString(webNtpIpText);
+    uint8_t ownIp[4] = {webNtpIp[0], webNtpIp[1], webNtpIp[2], webNtpIp[3]};
+    const uint8_t netMode = gwEffectiveMode((uint8_t)meshcom_settings.node_hamnet_only, ownIp, staticLegacy);
 
-    bool bHamnet = (webNtpIp[0] == 44 || meshcom_settings.node_hamnet_only == 1);
+    // nRF52 has no DNS resolver: an own NTP host name is ignored there (gwResolve sets ownntp_ignored)
+#if defined(NRF52_SERIES)
+    const bool hasResolver = false;
+#else
+    const bool hasResolver = true;
+#endif
 
-    if (bHamnet)
-        return (webNtpIp[1] == 143) ? "44.143.0.9 (default)" : "44.148.224.123 (default)";
+    GwTarget t;
+    if (!gwResolveNode(meshcom_settings.node_gwsrv, netMode, ownIp,
+                       meshcom_settings.node_ownntp, hasResolver, &t))
+        return String("n/a");
+
+    // own NTP in effect (IPv4 literal, or host name where a resolver exists)
+    if (strlen(meshcom_settings.node_ownntp) >= 7 && !t.ownntp_ignored)
+    {
+        if (t.ntp_host != NULL)
+            return String(t.ntp_host);
+        char obuf[20];
+        snprintf(obuf, sizeof(obuf), "%u.%u.%u.%u", t.ntp_ip[0], t.ntp_ip[1], t.ntp_ip[2], t.ntp_ip[3]);
+        return String(obuf);
+    }
+
+    String def;
+    if (t.ntp_host != NULL)
+    {
+        def = String(t.ntp_host) + " (default)";
+    }
     else
-        return "pool.ntp.org (default)";
+    {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%u.%u.%u.%u (default)", t.ntp_ip[0], t.ntp_ip[1], t.ntp_ip[2], t.ntp_ip[3]);
+        def = String(buf);
+    }
+    if (t.ownntp_ignored)
+        def += " (own NTP ignored)";
+    return def;
 }
 
 /**
@@ -1576,6 +1622,22 @@ void sub_page_position()
     web_client.println(); // The HTTP response ends with another blank line
 }
 
+// Firmware-Stand als "v4.40a", "-" wenn unbekannt. Auf der Luft stehen nur
+// die Stellen hinter "4." (msg_source_fw_version, 40 = 4.40) und der
+// Buchstabe (msg_source_fw_sub_version). ver/sub kommen aus DERSELBEN
+// Momentaufnahme wie das Rufzeichen der Zeile (NbrRowView/NbrMhView): ein
+// zweites nbrRowGet() koennte auf nRF52 (OnRxDone im LORA-Task) schon eine
+// neu vergebene Zeile lesen. Eigene Zeile: shortVERSION()/shortSUBVERSION().
+static void webPrintFw(uint8_t ver, char sub)
+{
+    if (ver == 0)
+        web_client.print("-");
+    else if (sub >= 'a' && sub <= 'z')
+        web_client.printf("v4.%02u%c", (unsigned)ver, sub);
+    else
+        web_client.printf("v4.%02u", (unsigned)ver);
+}
+
 /**
  * ###########################################################################################################################
  * delivers the mheard-page to be injected into the scaffold
@@ -1612,7 +1674,8 @@ void sub_page_mheard()
                      "It hears: stations it hears, as far as my table knows. "
                      "Only it hears: of those, how many no other direct neighbour of mine hears -- its value as a relay for me. "
                      "Relay role: Super node = by far the most exclusive stations; Needed = at least one exclusive station; Redundant = everything it hears is heard by others too. "
-                     "It reports: the neighbour count the station announces itself (NCNT).</p>");
+                     "It reports: the neighbour count the station announces itself (NCNT). "
+                     "Firmware: the version the station puts into its own frames, '-' until one arrives.</p>");
 
     uint8_t *idx = (uint8_t *)malloc((size_t)NBR_MAX_ROWS);
     if (idx == NULL)
@@ -1628,6 +1691,7 @@ void sub_page_mheard()
 
     for (int k = 0; k < shown; k++)
     {
+        meshcom_wdt_feed(); // one feed per card; shown <= NBR_MAX_ROWS keeps the loop bounded
         NbrMhView v;
         if (!nbrMhGet(nbrMatrix, idx[k], now_min, &v))
             continue;
@@ -1661,6 +1725,9 @@ void sub_page_mheard()
             web_client.printf("<div><span class=\"font-bold\">Last frame:</span><br><span>%s</span></div>", ptype);
         }
         web_client.printf("<div><span class=\"font-bold\">Hardware:</span><br><span>%s</span></div>", nbrHardwareName(v.hw));
+        web_client.print("<div><span class=\"font-bold\">Firmware:</span><br><span>");
+        webPrintFw(v.fw_ver, v.fw_sub);
+        web_client.print("</span></div>");
         web_client.printf("<div><span class=\"font-bold\">Country / mode:</span><br><span title=\"high nibble: country index, low nibble: LoRa modulation\">%01X / %01X</span></div>", (v.mod >> 4), (v.mod & 0x0f));
         if (v.rssi == NBR_MH_RSSI_UNKNOWN)
             web_client.printf("<div><span class=\"font-bold\">RSSI:</span><br><span></span></div>");
@@ -1854,6 +1921,7 @@ void sub_page_path()
         rec[nrec].idx = (uint16_t)i;
         nrec++;
     }
+    meshcom_wdt_feed(); // once after collecting routes; loop bounded by route_total and maxrec
 
     // Einfuegesortieren nach Hops, dann Alter (beide aufsteigend) -- rec[0]
     // (eigene Zeile, Hops 0) bleibt dabei an erster Stelle.
@@ -1868,16 +1936,18 @@ void sub_page_path()
         }
         rec[b + 1] = key;
     }
+    meshcom_wdt_feed(); // once after the sort; nrec <= maxrec
 
     // Tabelle DIREKT unter #content_inner, keine Wrapper-div: das Tabellen-
     // CSS des Scaffolds greift nur auf "#content_inner > table" (siehe
     // sub_page_neighbours() unten, Bench 2026-09-20).
     web_client.println("<table class=\"table\">");
     web_client.println("<thead><tr class=\"font-bold\"><td>Call</td><td>Hops</td><td>GW</td><td>Mesh</td>"
-                        "<td>Hears me</td><td>Via / Covered by</td><td>Reach</td><td>Age (min)</td></tr></thead>");
+                        "<td>Firmware</td><td>Hears me</td><td>Via / Covered by</td><td>Reach</td><td>Age (min)</td></tr></thead>");
 
     for (size_t k = 0; k < nrec; k++)
     {
+        meshcom_wdt_feed(); // one feed per record; nrec <= maxrec keeps the loop bounded
         PathRec &pr = rec[k];
 
         if (pr.kind == 0)
@@ -1889,6 +1959,9 @@ void sub_page_path()
                 web_client.print("<td>-</td>");
             else
                 web_client.printf("<td>%s</td>", (r0.flags & NBR_FLAG_MESH) ? "Y" : "N");
+            web_client.print("<td>");
+            webPrintFw(shortVERSION(), shortSUBVERSION());
+            web_client.print("</td>");
             web_client.print("<td>-</td>"); // Hears me: keine Kante nach mir selbst
             web_client.print("<td>-</td>"); // Via / Covered by: nicht anwendbar auf die eigene Zeile
 
@@ -1921,6 +1994,9 @@ void sub_page_path()
                 web_client.print("<td>-</td>");
             else
                 web_client.printf("<td>%s</td>", (v.flags & NBR_FLAG_MESH) ? "Y" : "N");
+            web_client.print("<td>");
+            webPrintFw(v.fw_ver, v.fw_sub);
+            web_client.print("</td>");
 
             NbrEdgeView hm;
             if (nbrEdgeGet(nbrMatrix, 0, X, &hm) && hm.snr != NBR_SNR_UNKNOWN && nbrFresh(hm.last_min, now_min))
@@ -1970,7 +2046,8 @@ void sub_page_path()
 
         bool hasRow = (r.row != 0xFF);
         NbrRowView rv;
-        uint8_t rowFlags = hasRow && nbrRowGet(nbrMatrix, r.row, &rv) ? rv.flags : 0;
+        bool rowOk = hasRow && nbrRowGet(nbrMatrix, r.row, &rv);
+        uint8_t rowFlags = rowOk ? rv.flags : 0;
 
         web_client.printf("<tr><td><a href=\"https://aprs.fi/?call=%s\" target=\"_blank\">%s</a></td>", urlEncode(r.call).c_str(), htmlEscape(String(r.call)).c_str());
         web_client.printf("<td>%u</td>", (unsigned)r.hops);
@@ -1980,6 +2057,13 @@ void sub_page_path()
             web_client.print("<td>-</td>"); // Horizont hat keine Zeile, oder keine Positions-Info
         else
             web_client.printf("<td>%s</td>", (rowFlags & NBR_FLAG_MESH) ? "Y" : "N");
+
+        web_client.print("<td>");
+        if (rowOk)
+            webPrintFw(rv.fw_ver, rv.fw_sub);
+        else
+            web_client.print("-"); // Horizont (keine Zeile) oder Zeile zwischendurch verschwunden
+        web_client.print("</td>");
 
         if (hasRow)
         {
@@ -2053,6 +2137,7 @@ void sub_page_path()
     // Telefon nicht, deshalb stehen dieselben Erklaerungen hier als Text.
     web_client.print("<p style=\"font-size:var(--fs-s);color:#555;\">"
                       "Hops: 0 = me, 1 = direct neighbour, 2+ = reached via other nodes."
+                      " | Firmware: the version the station puts into its own frames, '-' until one arrives or beyond 2 hops."
                       " | Hears me: SNR at which that neighbour last reported hearing me, '-' if unknown or not a direct/2-hop row."
                       " | Via: the entry path this station was heard on (2-hop: the direct neighbour it is via; horizon: the entry row, and beyond it if cheap to show)."
                       " Covered by (direct neighbours only): other direct neighbours that also hear this one -- 'only me' means I am its only link."
@@ -2201,6 +2286,7 @@ void sub_page_neighbours()
     // wird hier nicht nachgebaut) je sichtbarer Zeile.
     for (uint8_t i = 0; i < n; i++)
     {
+        meshcom_wdt_feed(); // one feed per row; n <= NBR_MAX_ROWS keeps the loop bounded
         uint8_t X = idx[i];
         // -1 ("NA") ist moeglich, wenn der LORA-Task (nRF52) die Kante (X, 0)
         // zwischen nbrDirectMask() oben und diesem Aufruf freigibt -- als 0
@@ -2224,6 +2310,7 @@ void sub_page_neighbours()
     nCount[0] = (uint8_t)((nbrMaskCount(directMaskGlobal) > 255) ? 255 : nbrMaskCount(directMaskGlobal));
     for (uint8_t frm = 0; frm < NBR_MAX_ROWS; frm++)
     {
+        meshcom_wdt_feed(); // one feed per row; frm < NBR_MAX_ROWS keeps the loop bounded
         NbrMask hm = nbrHearersMask(nbrMatrix, frm, now_min);
         for (int y = nbrMaskNext(hm, -1); y >= 0; y = nbrMaskNext(hm, y))
         {
@@ -2315,6 +2402,7 @@ void sub_page_neighbours()
     web_client.print("<td title=\"Super: largest exclusive share. Needed: has exclusive nodes. Redundant: everything it hears is heard by others.\">Role</td>");
     for (uint8_t j = colStart; j < colEnd; j++)
     {
+        meshcom_wdt_feed(); // one feed per header column; colEnd - colStart <= 64 keeps the loop bounded
         web_client.printf("<td>%u<br><span style=\"writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap;\">", (unsigned)(j + 1));
         nbrPrintCall(idx[j]);
         web_client.print("</span></td>");
@@ -2323,6 +2411,7 @@ void sub_page_neighbours()
 
     for (uint8_t i = 0; i < n; i++)
     {
+        meshcom_wdt_feed(); // one feed per row; n <= NBR_MAX_ROWS keeps the loop bounded
         uint8_t X = idx[i];
         bool rowESelf = false;
         for (uint8_t e = 0; e < neself_shown; e++)
