@@ -345,6 +345,16 @@ void btn_event_handler_setup_btn(lv_event_t * e)
 
         return;
     }
+    else if (lv_event_get_target(e) == btn_blauto)
+    {
+        // TD-23: same path as the serial "--bl auto on/off" (sets, saves, applies)
+        if (lv_obj_has_state(btn_blauto, LV_STATE_CHECKED))
+            commandAction((char*)"--bl auto on", false);
+        else
+            commandAction((char*)"--bl auto off", false);
+
+        return;
+    }
     else if (lv_event_get_target(e) == btn_track)
     {
         if (bDEBUG)
@@ -536,6 +546,10 @@ void btn_event_handler_setup(lv_event_t * e)
             commandAction(cCmd, false);
         }
 
+        // GPS-11: position before the save, for gpsPosFilterManualSet()
+        double oldLat = meshcom_settings.node_lat, oldLon = meshcom_settings.node_lon;
+        char oldLatC = meshcom_settings.node_lat_c, oldLonC = meshcom_settings.node_lon_c;
+
         // LAT
         strVar = lv_textarea_get_text(setup_lat);
         char cNew[15] = {0};
@@ -552,6 +566,7 @@ void btn_event_handler_setup(lv_event_t * e)
 
         strVar = lv_textarea_get_text(setup_lon_c);
         meshcom_settings.node_lon_c = strVar.charAt(0);
+        gpsPosFilterManualSet(oldLat, oldLatC, oldLon, oldLonC);   // GPS-11: resets only on a change
 
         // ALT
         strVar = lv_textarea_get_text(setup_alt);

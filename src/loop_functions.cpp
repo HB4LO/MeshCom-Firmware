@@ -26,6 +26,11 @@
 #include "extudp_functions.h"
 #include "kiss_functions.h"
 #include "configuration.h"
+#include "loop_functions_extern.h"   // REMOTE_LED_PIN rule + RM LED levels
+#include "board_led.h"
+#if defined(ESP32)
+#include "esp32/esp32_pmu.h"   // chargeLedFitted()
+#endif
 
 #include "TinyGPSPlus.h"
 
@@ -42,8 +47,13 @@
 #endif
 #include "mcp17_bits.h"
 #include "pos_tag_nan.h"
+#include "prod_lock.h"   // production lock: {SET} hop range
+#include "instrument.h"   // INSTRUMENT_ENABLED
+#include "rm_client_cmd.h"   // client RM1 commands: reply stops their repeats
+#include "lora_functions.h"   // rm1StoppedForget()
 #include "dm_text_escape.h"   // P14/P15: {ping}/{SET}-Ausnahme vom Klammer-Escape
 #include "nbr_matrix.h"   // nbrMatrix, nbrBuildReport(), nbrLog -- sendNbrReport() unten
+#include "ping_target.h"   // One ping-target rule
 #include "own_msg_status.h"   // durable delivery state of own text messages (web GUI ticks)
 
 bool gpsDetected = false;
@@ -89,6 +99,199 @@ int ifalseping = 0;
 
 int BOARD_HARDWARE = MODUL_HARDWARE;
 bool bUSER_BOARD_LED = false;
+
+// LED-08/09/10 (design 6.1): which LEDs exist on this build/node, the one source for --info, BLE SN/SN1 and the web
+// GUI. Board LED = BOARD_LED pin or a NeoPixel-only heartbeat (LED_PIN with pixels, no BOARD_LED); charge LED =
+// AXP compiled in AND a PMU answered (chargeLedFitted(): false without AXP). ledFitted() of board_led.h decides.
+LedFitted ledFittedNow(void)
+{
+#if defined(BOARD_LED)
+    const bool boardPin = true;
+#else
+    const bool boardPin = false;
+#endif
+#if defined(LED_PIN) && defined(LED_PIXEL) && (LED_PIXEL > 0) && !defined(BOARD_LED)
+    const bool neo = true;
+#else
+    const bool neo = false;
+#endif
+#if defined(ESP32)
+    return ledFitted(boardPin, neo, true, chargeLedFitted());
+#else
+    return ledFitted(boardPin, neo, false, false);   // nRF52: no PMU charge LED
+#endif
+}
+
+#if defined(REMOTE_LED_PIN)
+bool bRemoteLed = false;        // RM "led on|flash": never persisted, off after boot
+bool bRemoteLedFlash = false;
+
+bool remoteLedPinUsable(void)
+{
+#if defined(BOARD_LED) && (REMOTE_LED_PIN == BOARD_LED)
+    return boardLedPinUsable();   // the board LED pad: OneWire may own it (T-Beam GPIO4)
+#else
+    return true;                  // own pad (Heltec V3/V4 GPIO35)
+#endif
+}
+
+void remoteLedSet(int mode)
+{
+    bRemoteLed = (mode == 1 || mode == 2);
+    bRemoteLedFlash = (mode == 2);
+    if (!remoteLedPinUsable())   // pad shared with OneWire (T-Beam GPIO4): never drive it
+    {
+        bRemoteLed = false;
+        bRemoteLedFlash = false;
+        return;
+    }
+    pinMode(REMOTE_LED_PIN, OUTPUT);
+    digitalWrite(REMOTE_LED_PIN, mode == 1 ? REMOTE_LED_ON_LEVEL : REMOTE_LED_OFF_LEVEL);
+}
+
+void remoteLedTick(void)
+{
+    if (!remoteLedPinUsable())   // OneWire took the pad (steady hold or flashing): release without writing the pin
+    {
+        bRemoteLed = false;
+        bRemoteLedFlash = false;
+        return;
+    }
+    if (!bRemoteLedFlash)
+        return;
+    const bool lit = (millis() % REMOTE_LED_FLASH_PERIOD_MS) < REMOTE_LED_FLASH_ON_MS;
+    digitalWrite(REMOTE_LED_PIN, lit ? REMOTE_LED_ON_LEVEL : REMOTE_LED_OFF_LEVEL);
+}
+
+void remoteLedForceOff(void)
+{
+    remoteLedSet(0);
+}
+#endif
+
+// Board LED heartbeat ("--board led on": 30 ms every 2 s), W1 helpers. The decision logic is in board_led.h
+// (native test); this is the pin side. BOARD_LED = plain GPIO LED; LED_PIN without BOARD_LED = NeoPixel only
+// (S3 DevKitC): the pulse goes through the status-colour path of esp32_main.cpp (bLED_WEISS). Boards with
+// nRF52 (RAK4631, T114, T-Echo) use the same code through BOARD_LED / LED_STATE_ON (LED-07).
+#if defined(BOARD_LED) || defined(LED_PIN)
+    #ifndef BOARD_LED_ACTIVE_LOW
+        #define BOARD_LED_ACTIVE_LOW 0
+    #endif
+    #if defined(BOARD_LED)
+        #define BOARD_LED_DRIVE_PIN BOARD_LED
+    #else
+        #define BOARD_LED_DRIVE_PIN LED_PIN
+        #include <Adafruit_NeoPixel.h>
+        extern Adafruit_NeoPixel pixels;   // esp32_main.cpp
+    #endif
+    #if defined(LED_PIN)
+        // NeoPixel status path of esp32_main.cpp. No variant defines both BOARD_LED and LED_PIN after W4;
+        // the branch is kept for a board that does, which then pulses the pixel white with every flash
+        extern bool bLED_WEISS;
+        extern unsigned long pixels_delay;
+    #endif
+    #if defined(BOARD_TBEAM)
+        #define BOARD_LED_OW_TBEAM_REMAP true    // onewire_functions.cpp: stored 16 -> 0 -> OneWire_GPIO
+    #else
+        #define BOARD_LED_OW_TBEAM_REMAP false
+    #endif
+    #if defined(OneWire_GPIO)
+        #define BOARD_LED_OW_COMPILE (OneWire_GPIO)
+    #else
+        #define BOARD_LED_OW_COMPILE (-1)
+    #endif
+
+static bool boardLedLit = false;       // logical flasher state (starts dark, LED-11)
+static uint32_t boardLedTimer = 0;
+
+bool boardLedPinUsable(void)
+{
+    return boardLedPinFree(bONEWIRE, boardLedOwPin(meshcom_settings.node_owgpio, BOARD_LED_OW_COMPILE, BOARD_LED_OW_TBEAM_REMAP),
+                           BOARD_LED_DRIVE_PIN);
+}
+
+#if defined(LED_PIN)
+// Same guards as the inline flasher in esp32_main.cpp: no status colour running or pending
+static void boardLedWhitePulse(void)
+{
+    if (pixels_delay == 0 && !bLED_CLEAR)
+    {
+        if (!bLED_RED && !bLED_GREEN && !bLED_ORANGE && !bLED_BLUE)
+            bLED_WEISS = true;   // lit edge only; the NeoPixel handler shows it and clears it again
+    }
+}
+#endif
+
+#if defined(BOARD_LED)
+static bool boardLedOutput = false;   // pinMode(OUTPUT) done since the pad was last given up
+#endif
+
+static void boardLedWrite(bool lit)
+{
+    #if defined(BOARD_LED)
+        #if defined(LED_PIN)
+        if (lit)
+            boardLedWhitePulse();
+        #endif
+        // RM "led on|flash" holds the same pad: the flasher only keeps its phase
+        #if defined(REMOTE_LED_PIN) && (REMOTE_LED_PIN == BOARD_LED)
+        if (bRemoteLed)
+            return;
+        #endif
+        if (!boardLedOutput)   // pad may come back from OneWire at run time
+        {
+            pinMode(BOARD_LED, OUTPUT);
+            boardLedOutput = true;
+        }
+        digitalWrite(BOARD_LED, boardLedLevel(lit, BOARD_LED_ACTIVE_LOW));
+    #else
+        if (lit)
+            boardLedWhitePulse();
+    #endif
+}
+
+void boardLedTick(void)
+{
+    if (!bUSER_BOARD_LED || !boardLedPinUsable())
+    {
+        if (boardLedLit)   // switched off (or OneWire took the pin) mid-flash: leave dark
+        {
+            boardLedLit = false;
+            if (boardLedPinUsable())   // OneWire owns the pad: clear the state, never write the pin
+                boardLedWrite(false);
+        }
+        #if defined(BOARD_LED)
+        if (!boardLedPinUsable())
+            boardLedOutput = false;
+        #endif
+        return;
+    }
+    const BoardLedStep st = boardLedPhase(millis(), boardLedTimer, boardLedLit);
+    boardLedTimer = st.timer;
+    boardLedLit = st.lit;
+    if (st.changed)
+        boardLedWrite(st.lit);
+}
+
+void boardLedForceOff(void)   // before deep sleep: LED dark, flasher phase reset
+{
+    boardLedLit = false;
+    if (!boardLedPinUsable())
+        return;   // the pad belongs to OneWire: not ours to drive
+    #if defined(BOARD_LED)
+        pinMode(BOARD_LED, OUTPUT);
+        digitalWrite(BOARD_LED, boardLedLevel(false, BOARD_LED_ACTIVE_LOW));
+    #else
+        bLED_WEISS = false;
+        pixels.clear();
+        pixels.show();
+    #endif
+}
+#else
+bool boardLedPinUsable(void) { return false; }
+void boardLedTick(void) {}
+void boardLedForceOff(void) {}
+#endif
 
 bool bRadio=false;
 
@@ -193,6 +396,7 @@ bool bLPS33 = false;
 
 bool bme680_found = false;
 bool bmx_found = false;
+bool bmx_is_bme = false;   // chip ID 0x60 (BME280) detected; read only together with bmx_found
 int bmx_start = 0;
 bool bmp3_found = false;
 bool aht20_found =false;
@@ -468,8 +672,6 @@ int iWriteOwn=0;
 
 // RINGBUFFER for incoming UDP lora packets for lora TX
 unsigned char ringBuffer[MAX_RING][UDP_TX_BUF_SIZE+5] = {0};
-ring_index_t iWrite{0};
-ring_index_t iRead{0};
 int iRetransmit=-1;
 
 // FIX: Per-slot retry counter for retransmit cap
@@ -542,10 +744,18 @@ bool ble_disconnect_requested = false;
 static uint8_t udpOutStore[RING_BYTES_UDP];
 byte_fifo_t udpOutRing = BYTE_FIFO_INIT(udpOutStore);
 
+// phoneRing / phoneComRing: static storage everywhere, except on the classic ESP32 with the AU BLE
+// pause (PHONE_RINGS_DYNAMIC): there they start without storage (cap 0 = empty, push drops),
+// phoneRingsAttach() allocates 2 + 3 KB at BLE start and esp32BlePause() releases them, so the
+// TLS job gets the 5 KB (heap verdict 2026-10-18, lever 3).
+#if PHONE_RINGS_DYNAMIC
+byte_fifo_t phoneRing = {NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+#else
 static uint8_t phoneStore[RING_BYTES_PHONE];
 byte_fifo_t phoneRing = BYTE_FIFO_INIT(phoneStore);
 
 static uint8_t phoneComStore[RING_BYTES_PHONECOM];
+#endif
 // Der BLE-Config-Burst nach dem Verbinden (config_cmds[] in esp32_main.cpp /
 // nrf52_main.cpp, --nodeset liefert SN und SN1) geht in EINEM
 // Schleifendurchlauf in diesen Ring und wird mit einem Frame je 300 ms
@@ -554,7 +764,30 @@ static uint8_t phoneComStore[RING_BYTES_PHONECOM];
 // Node-Settings. Obergrenze: 12 Frames zu je 245 Byte plus Laengenbyte.
 static_assert(RING_BYTES_PHONECOM >= 12 * (245 + 1),
               "phoneComRing must hold the whole BLE config burst (12 x 246 B)");
+#if PHONE_RINGS_DYNAMIC
+byte_fifo_t phoneComRing = {NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+bool phoneRingsAttach(void)
+{
+    // all or nothing (bf_attach_all): never one ring up and the other without storage
+    byte_fifo_t *const rings[2] = {&phoneRing, &phoneComRing};
+    static const uint16_t caps[2] = {RING_BYTES_PHONE, RING_BYTES_PHONECOM};
+    return bf_attach_all(rings, caps, 2, malloc, free);
+}
+
+void phoneRingsDetach(void)
+{
+    // bf_detach() sets cap/buf under the ring lock (byte_fifo.cpp, portMUX on ESP32), so no
+    // producer or reader on the loop/LoRa/web tasks can still be inside a ring afterwards:
+    // the memory is freed right away.
+    byte_fifo_t *const rings[2] = {&phoneRing, &phoneComRing};
+    bf_detach_free(rings, 2, free);
+}
+#else
 byte_fifo_t phoneComRing = BYTE_FIFO_INIT(phoneComStore);
+bool phoneRingsAttach(void) { return true; }
+void phoneRingsDetach(void) {}
+#endif
 
 // BLE-N1/N2: counters of the node->phone path (sent, retried, dropped,
 // truncated, evicted, last MTU). Written by the producers below and by the
@@ -656,9 +889,12 @@ uint16_t stat_tx_count[6] = {0};
 uint16_t stat_drop_count[6] = {0};
 uint16_t stat_preempt_count = 0;
 uint32_t stat_latency_sum[6] = {0};
-uint16_t stat_latency_max[6] = {0};
+uint32_t stat_latency_max[6] = {0};
 uint8_t  stat_queue_hwm = 0;
 uint16_t stat_csma_hwm_attempts = 0;
+uint32_t stat_csma_aged_boot[3] = {0}; // since boot
+uint32_t stat_wait_hwm_ms = 0;         // max queue latency since boot
+int      tx_cad_attempt = 0;           // cad_attempt captured at CAD_FREE, before csma_reset()
 unsigned long stat_prio_timer = 0;
 unsigned long stat_hwm_timer = 0;
 unsigned long telemetry_timer = 0;      // we check periodically to send TELEMETRY
@@ -856,7 +1092,7 @@ void insertOwnTx(unsigned int msg_id)
 #if defined(BOARD_T_ECHO)
 #define maxdisplines 11
 #define PAGE_MAX 6
-#elif defined(WP_DISP)
+#elif defined(WP_DISP) || defined(BOARD_E290)
 #define maxdisplines 7
 #define PAGE_MAX 10   // Wireless Paper: bis zu 9 gespeicherte Nachrichten in einer Loop durchblaettern
 #else
@@ -1087,6 +1323,31 @@ void E290DisplayUpdate()
     #endif
 }
 
+#if defined(BOARD_E290)
+// E290 refresh policy. Returns true when this page update should be a full refresh (it flashes the panel).
+//  - OTP build (EINK_HELTEC_VME290_OTP): quiet partial refresh. Default E290_FULL_EVERY=0: never a full
+//    refresh (tested on FPC-7519revb panels, no ghost build-up). Build with -D E290_FULL_EVERY=N to get a full
+//    "cleaning" refresh after every N page updates. The TRACK page always uses partial refresh.
+//  - Stock build: never (original behaviour, partial refresh only).
+#ifndef E290_FULL_EVERY
+#define E290_FULL_EVERY 0
+#endif
+static bool e290FullRefreshDue()
+{
+    #ifdef EINK_HELTEC_VME290_OTP
+    static int cnt = 0;
+    if(bDisplayTrack || E290_FULL_EVERY <= 0)
+        return false;
+    if(++cnt >= E290_FULL_EVERY)
+    {
+        cnt = 0;
+        return true;
+    }
+    #endif
+    return false;
+}
+#endif
+
 void sendDisplay1306(bool bClear, bool bTransfer, int x, int y, char *text)
 {
     #if !defined (BOARD_T_DECK)  && !defined (BOARD_T_DECK_PLUS)
@@ -1233,7 +1494,19 @@ void sendDisplay1306(bool bClear, bool bTransfer, int x, int y, char *text)
                     // V1.2) ueberspringen -> je Blaetter-Schritt nur EIN Voll-Refresh.
                     if(memcmp(text, "#N", 2) != 0)
                     #endif
+                    {
+                    #if defined(BOARD_E290)
+                    // E290: partial refresh, full "cleaning" refresh only now and then (see e290FullRefreshDue()).
+                    bool bE290Full = e290FullRefreshDue();
+                    if(bE290Full)
+                        epaper_display.fastmodeOff();
+                    #endif
                     epaper_display.update();
+                    #if defined(BOARD_E290)
+                    if(bE290Full)
+                        epaper_display.fastmodeOn();   // back to fastmode ON: the panel RAMs hold what is on screen
+                    #endif
+                    }
                 }
             }
             
@@ -2502,21 +2775,27 @@ void sendDisplayText(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
         // die 44 statt 4 Relaissprunge weit laufen.
         //
         // Wie bisher wird jedes Feld einzeln uebernommen, sobald sscanf es
-        // gelesen hat ({SET}4; setzt weiterhin nur max_hop_text). Neu ist
-        // ausschliesslich, dass Werte ausserhalb 0..MAX_HOP_LIMIT den
-        // bisherigen Wert stehen lassen, statt ihn zu ueberschreiben.
+        // gelesen hat ({SET}4; setzt weiterhin nur max_hop_text). Den erlaubten
+        // Bereich liefert prod_lock.h: Produktion max_hop_text 1..6 und kein
+        // max_hop_pos; INSTRUMENT-Builds 0..MAX_HOP_LIMIT fuer beide Felder.
+        // Ausserhalb bleibt der bisherige Wert stehen.
         int iHopText = meshcom_settings.max_hop_text;
         int iHopPos  = meshcom_settings.max_hop_pos;
 
         int iParsed = sscanf(cset+5, "%d;%d;", &iHopText, &iHopPos);
+        const bool bInstr = (INSTRUMENT_ENABLED != 0);
 
-        if(iParsed >= 1 && iHopText >= 0 && iHopText <= MAX_HOP_LIMIT && iHopText != meshcom_settings.max_hop_text)
+        if(iParsed >= 1)
         {
-            meshcom_settings.max_hop_text = iHopText;
-            save_settings();    // max_hop_text is persistent (max_hop_pos is not)
+            const int iNewText = prodLockSetHop(iHopText, meshcom_settings.max_hop_text, bInstr);
+            if(iNewText != meshcom_settings.max_hop_text)
+            {
+                meshcom_settings.max_hop_text = iNewText;
+                save_settings();    // max_hop_text is persistent (max_hop_pos is not)
+            }
         }
 
-        if(iParsed >= 2 && iHopPos >= 0 && iHopPos <= MAX_HOP_LIMIT)
+        if(iParsed >= 2 && prodLockSetPosAllowed(bInstr) && iHopPos >= 0 && iHopPos <= MAX_HOP_LIMIT)
             meshcom_settings.max_hop_pos = iHopPos;
 
         return;
@@ -2640,10 +2919,13 @@ void sendDisplayText(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
 
         TDeck_pro_lora_disp(strPath, strAscii);
 
-        strncpy(pageLastTextLong1[pagePointer], msg_text, sizeof(pageLastTextLong1[pagePointer]) - 1);
-        pageLastTextLong1[pagePointer][sizeof(pageLastTextLong1[pagePointer]) - 1] = '\0';
-        strncpy(pageLastTextLong2[pagePointer], strAscii.c_str(), sizeof(pageLastTextLong2[pagePointer]) - 1);
-        pageLastTextLong2[pagePointer][sizeof(pageLastTextLong2[pagePointer]) - 1] = '\0';
+        // bounded copies, truncation intended (the page shows the head of the text)
+        size_t n1 = strnlen(msg_text, sizeof(pageLastTextLong1[pagePointer]) - 1);
+        memcpy(pageLastTextLong1[pagePointer], msg_text, n1);
+        pageLastTextLong1[pagePointer][n1] = '\0';
+        size_t n2 = strnlen(strAscii.c_str(), sizeof(pageLastTextLong2[pagePointer]) - 1);
+        memcpy(pageLastTextLong2[pagePointer], strAscii.c_str(), n2);
+        pageLastTextLong2[pagePointer][n2] = '\0';
 
         bSetDisplay = false;
 
@@ -2706,7 +2988,16 @@ void sendDisplayText(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
     // kein Ghosting. Die schnellen Partial-Updates (Uhrzeit) bleiben unberuehrt.
     epaper_display.fastmodeOff();
     #endif
+    #if defined(BOARD_E290)
+    bool bE290Full = e290FullRefreshDue();   // E290: partial refresh, full one only now and then
+    if(bE290Full)
+        epaper_display.fastmodeOff();
+    #endif
     epaper_display.update();
+    #if defined(BOARD_E290)
+    if(bE290Full)
+        epaper_display.fastmodeOn();   // back to fastmode ON, see sendDisplay1306
+    #endif
 
     #elif defined (BOARD_T5_EPAPER)
     // extra source
@@ -3550,6 +3841,21 @@ PingResult sendPing(char msg_call[10])
     }
     bPingTrackNoticeShown = false;
 
+    // Last guard, before the msg_id advances and before any pool write.
+    // Group, special target, own call or junk never leaves the node (a group ping
+    // only draws gateway ACKs, it can never be answered). Once per episode.
+    static bool bPingInvalidNoticeShown = false;
+    if(!pingTargetValid(msg_call, meshcom_settings.node_call))
+    {
+        if(!bPingInvalidNoticeShown)
+        {
+            printfdeb("[PING]...invalid target %s, ping not sent\n", msg_call);
+            bPingInvalidNoticeShown = true;
+        }
+        return PING_INVALID_TARGET;
+    }
+    bPingInvalidNoticeShown = false;
+
     uint8_t msg_buffer[MAX_MSG_LEN_PHONE];
 
     struct aprsMessage aprsmsg;
@@ -4217,6 +4523,15 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
         }
     }
 
+    // A manual {ping} only makes sense towards a callsign. After the
+    // {ZIEL} parse (a bare {ping} parses as destination PING), before any msg_id.
+    if(strMsg.startsWith("{ping}") &&
+       !pingTargetValid(strDestinationCall.c_str(), meshcom_settings.node_call))
+    {
+        printfdeb("[ERROR]...{ping} needs a callsign target\n");
+        return BP_SEND_INVALID;
+    }
+
     // BP-11: the node's own back-pressure wording fed back in by a client
     // (see bpIsOwnWording() in backpressure.h). Checked here, after the
     // {ZIEL} parse, because the observed shape is "{*}QRT NOT SENT - ..."
@@ -4282,8 +4597,8 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
 
     // P15: ein {ping} wird nie wiederholt -- die Gegenstelle antwortet mit
     // {pong}, nie mit ACK, also stoppte nichts die Wiederholung. Hier benannt
-    // (strMsg ist schon ohne {ZIEL}-Teil) und an jeder Stelle wiederverwendet,
-    // die ein {ping} anders behandelt: dmstat_sent, bUseOnce.
+    // (strMsg ist schon ohne {ZIEL}-Teil); sperrt dmstat_sent. Das Einreihen
+    // ueber addTxRingEntryOnce() entscheidet dmTextSendOnce() weiter unten.
     const bool bPingMsg = strMsg.startsWith("{ping}");
 
     // N-22: siehe Kommentar bei msg_text_check oben — auf nRF52 in BSS,
@@ -4340,6 +4655,16 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
                 strMsg.setCharAt(i, '(');
         }
 
+        // W0c / wave 3a: an RM1 frame (command or reply) carries no "{NNN" (the
+        // receiver sends no ACK) and no DM statistics entry (it would stay
+        // sent-never-acked), see dmTextIsRm1Frame(). The escaped text is the
+        // payload as is. A reply goes out once (dmTextSendOnce()); a command is
+        // enqueued like a PN and repeats on the 40 s ladder until the RM layer
+        // stops it (pnFrameIsOwnRm1Cmd(), findAndStopRingSlot()).
+        if(dmTextIsRm1Frame(strMsg.c_str()))
+            mcSet(aprsmsg.msg_payload, sizeof(aprsmsg.msg_payload), strMsg.c_str());
+        else
+        {
         char cAckId[4] = {0};
         snprintf(cAckId, sizeof(cAckId), "%03i", meshcom_settings.node_msgid);
         snprintf(aprsmsg.msg_payload, sizeof(aprsmsg.msg_payload), "%s{%s", strMsg.c_str(), cAckId);
@@ -4356,6 +4681,7 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
             dmstat_sent.fetch_add(1);
             dmStatNoteSent((uint16_t)meshcom_settings.node_msgid, millis());
         }
+        }
     }
 
     finalizeAndSendAPRS(aprsmsg, msg_buffer);
@@ -4371,47 +4697,35 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
     // ETH-03 (docs/BACKLOG.md 3.8at): this used to test `iWrite == iRead`,
     // which is ALSO the empty ring -- so a node with nothing queued printed
     // "[RING] overflow" on every user message and sent a whole investigation
-    // after a full ring that was not there. Occupancy is txRingDepth(), and
-    // the ring holds at most MAX_RING-1 entries (addTxRingEntry() keeps iRead
-    // one ahead of iWrite on overflow), so MAX_RING-1 is "full". The eviction
-    // itself (which slot, why) is decided and logged inside addTxRingEntry()
-    // below; this line is only a heads-up.
-    if (txRingDepth() >= MAX_RING - 1) {   // ring full: addTxRingEntry() will evict or refuse
-        Serial.printf("[RING] full, depth %d of %d\n", txRingDepth(), (int)MAX_RING - 1);
+    // after a full ring that was not there. Occupancy is txRingDepth(). Since
+    // the slot pool (TXP W1b) the TX buffer holds MAX_RING entries, so
+    // MAX_RING occupied slots is "full" (it used to be MAX_RING-1 with the
+    // iRead/iWrite ring). The eviction itself (which slot, why) is decided and
+    // logged inside addTxRingEntry() below; this line is only a heads-up.
+    if (txRingDepth() >= MAX_RING) {   // pool full: addTxRingEntry() will evict or refuse
+        Serial.printf("[RING] full, depth %d of %d\n", txRingDepth(), (int)MAX_RING);
     }
     // Status vorab aus msg_buffer bestimmen (statt aus dem Ring zu lesen): der
-    // Slot wird erst in addTxRingEntry() unter Lock gewaehlt/beschrieben.
-    uint8_t user_msg_status = 0xFF;
-    // P14/P15: {ping} wird nie wiederholt -- die Gegenstelle antwortet mit
-    // {pong}, nie mit ACK, also stoppte nichts die Wiederholung (ein Ping aus
-    // App/McApp ging dreimal in die Luft). Frueher wurde dafuer NACH dem
-    // Einreihen der Slot per Hand auf DONE nachgetragen (wie einst in
-    // SendAckMessage()): getMessagePriority() liest den Status IN
-    // addTxRingEntry() und stufte eine vorab auf DONE gesetzte DM als Relay
-    // (NORMAL) statt als persoenliche DM (CRITICAL) ein -- ein Nachtrag nach
-    // dem Aufruf war der einzige Ausweg, aber ausserhalb des Locks (siehe
-    // addTxRingEntryOnce()-Doku in txring_functions.cpp). bUseOnce waehlt
-    // stattdessen addTxRingEntryOnce() weiter unten: klassifiziert READY,
-    // speichert DONE, beides atomar.
+    // Slot wird erst im Einreihen unter Lock gewaehlt/beschrieben.
+    uint8_t user_msg_status = 0x00;
+    // RCA 2026-10-10: Texte, die genau einmal in die Luft gehen ({ping},
+    // {CET}/{MCP}/{SET}, RM1-Antwort; dmTextSendOnce() in dm_text_escape.h), laufen
+    // ueber addTxRingEntryOnce(): klassifiziert READY (eigene DM/Gruppe),
+    // gespeichert DONE (keine Wiederholung), beides atomar. Ein VORAB auf DONE
+    // (0xFF) gesetzter Text gilt in getMessagePriority() als Relay (NORMAL,
+    // 4500 ms) und kollidiert mit den Relays der Nachbarn; Hintergrund siehe
+    // addTxRingEntryOnce()-Doku in txring_functions.cpp.
     bool bUseOnce = false;
     if (msg_buffer[0] == 0x3A) // only Messages
     {
-        // {CET}/{MCP}/{SET} gehen ebenfalls genau einmal in die Luft. Mit Status
-        // 0xFF in addTxRingEntry() stufte getMessagePriority() sie als Relay ein
-        // (NORMAL, 4500 ms Backoff) und sie teilten das CSMA-Fenster der Relays
-        // der Nachbarn; daher ebenfalls ueber addTxRingEntryOnce(). {mcp} ist die
-        // Form, in die sendMessage() ein {MCP} nach {ZIEL} oben umschreibt -- sie
-        // lief bisher mit der vollen Wiederholungsleiter.
-        if(bPingMsg ||
-           mcStartsWith(aprsmsg.msg_payload, "{CET}") || mcStartsWith(aprsmsg.msg_payload, "{MCP}") ||
-           mcStartsWith(aprsmsg.msg_payload, "{mcp}") || mcStartsWith(aprsmsg.msg_payload, "{SET}"))
-            bUseOnce = true; // P14/P15: siehe oben
+        if(dmTextSendOnce(aprsmsg.msg_payload, bDM))
+            bUseOnce = true;
         else
-            user_msg_status = 0x00; // retransmission Status ...0xFF no retransmission
+            user_msg_status = 0x00; // retransmission active (PN, RM1 command: 40 s ladder)
     }
     else
     {
-        user_msg_status = 0xFF; // retransmission Status ...0xFF no retransmission
+        user_msg_status = 0xFF; // non-text frames: no retransmission (unchanged)
     }
 
     int w = bUseOnce ? addTxRingEntryOnce(msg_buffer, (uint16_t)aprsmsg.msg_len, "user_msg", 0)
@@ -4440,7 +4754,10 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
         // bp_state.refuseThreshold() (the same threshold onSend() itself
         // gates its QRT/QRS decision on); (1) and (2) fire regardless of
         // depth and typically on an empty or low ring.
-        if(txRingDepth() >= bp_state.refuseThreshold())
+        // QRT Finding 5: RING_ENQUEUE_FULL (-2) is the no-evict overflow and
+        // always gets the QTA nack, also below the threshold (index-span
+        // "full" with holes: 11 of 19 drops in the capture at depth <= 11).
+        if(sendMessageNeedsQtaNack(w, txRingDepth(), bp_state.refuseThreshold()))
         {
             // Symmetrie (Operatorentscheidung 2026-09-01, E4): was nicht auf HF geht,
             // geht auch nicht ins Backbone. Kein Echo, kein UDP-Uplink, kein
@@ -4463,10 +4780,14 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
     }
 
     // An APP als Anzeige retour senden
-    if(hasMsgFromPhone)
-    {
+    // UDP-05: EXTUDP sends are echoed too, so they show in the WebUI chat
+    // (and a connected app); the ack frame below stays phone/WebUI-only.
+    // Console "::" sends are echoed further down (bConsoleText).
+    if(phoneEchoWanted(hasMsgFromPhone, bp_origin))
         addBLEOutBuffer(msg_buffer, aprsmsg.msg_len);
 
+    if(hasMsgFromPhone)
+    {
         if(bGATEWAY && meshcom_settings.node_hasIPaddress)
         {
             // set Info message send and Server reached, not on DM
@@ -4504,11 +4825,6 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
     // enqueuing decides between silence, QRS and QRT.
     bpRoute(bp_state.onSend(txRingDepth(), false, millis()));
 
-    /*
-    iWrite++;
-    if(iWrite >= MAX_RING)
-        iWrite=0;
-    */
 
     if(bGATEWAY && meshcom_settings.node_hasIPaddress)
     {
@@ -4534,6 +4850,22 @@ int sendMessage(char *msg_text, int len, const char *src_override, unsigned int 
     // wenn text via Console kommt auch an BLE bzw. WEBService senden
     if(bConsoleText)
         addBLEOutBuffer(msg_buffer, aprsmsg.msg_len);
+
+    // Client RM1 command (McApp, phone, serial, web): the node holds no key, so the target's reply
+    // cannot be verified here; remember dst + ctr + msg_id so that reply stops the repeats
+    // (rm_client_cmd.h, rm_runtime.cpp handleReply()). Only after the ring accepted the frame. A command of
+    // the node's own sender (--rm) is forgotten again by bookAndSend(). Not for a KISS client's frame
+    // (src_override): its source is not ours, the ladder never repeats it and the reply is not for us.
+    if(bDM && !(src_override && src_override[0]) && dmTextIsRm1Command(strMsg.c_str()))
+    {
+        uint32_t rmCtr = 0;
+        if(rmClientParseCtr(strMsg.c_str(), rmCtr))
+        {
+            // as bookAndSend(): a stale "RM1 stopped" entry with this id core must not cut the new repeats
+            rm1StoppedForget((uint32_t)aprsmsg.msg_id);
+            rmClientCmdArm(strDestinationCall.c_str(), rmCtr, (uint32_t)aprsmsg.msg_id, millis());
+        }
+    }
 
     // KISS interface needs the assigned id for the TX-result frame / ack map.
     if(out_msg_id)
@@ -5267,11 +5599,6 @@ void sendAPPPosition(double lat, char lat_c, double lon, char lon_c, float temp2
     // local position-messages send to LoRa TX
     addTxRingEntry(msg_buffer, (uint16_t)aprsmsg.msg_len, 0xFF, "user_hey"); // 0xFF no retransmission
 
-    /*
-    iWrite++;
-    if(iWrite >= MAX_RING)
-        iWrite=0;
-    */
 
     if(bGATEWAY)
     {
@@ -5359,11 +5686,6 @@ unsigned int SendAckMessage(String dest_call, unsigned int iAckId, const char *s
     // ungenutzt, wie schon bisher (kein Nachtrag mehr noetig).
     addTxRingEntryOnce(msg_buffer, (uint16_t)aprsmsg.msg_len, "beacon");
 
-    /*
-    iWrite++;
-    if(iWrite >= MAX_RING)
-        iWrite=0;
-    */
     
     if(bGATEWAY && meshcom_settings.node_hasIPaddress)
     {
@@ -5472,11 +5794,6 @@ void sendHey()
         // local messages send to LoRa TX
         addTxRingEntry(msg_buffer, (uint16_t)aprsmsg.msg_len, 0xFF, "auto_pos"); // 0xFF no retransmission
 
-        /*
-        iWrite++;
-        if(iWrite >= MAX_RING)
-            iWrite=0;
-        */
     }
 }
 

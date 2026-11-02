@@ -136,6 +136,8 @@ void sendHeartbeat();
 #include "msgstore_settings.h"
 #endif
 #include <regex_functions.h>
+#include "onrx_stats.h" // OR-STAT
+#include "rx_silence.h" // RX-silence tracker
 #include "setlog_lines.h"
 #include "dedup_functions.h"
 #include "nbr_matrix.h"    // --nbrdebug: nbrLogSnapshot()/nbrMatrix fuer den 15-Minuten-Takt
@@ -143,6 +145,8 @@ void sendHeartbeat();
 #include <aprs_functions.h>
 #include <batt_functions.h>
 #include <lora_functions.h>
+#include "rm_runtime.h" // RM-05 (#1189): rmInit(), rmDrain()
+#include "blocked_calls.h" // BLK-01: blockListLoad()
 #include "txring_functions.h" // BP-02: txRingDepth() declaration
 #include <udp_functions.h>
 #include <web_functions/web_functions.h>
@@ -257,6 +261,49 @@ static RadioEvents_t RadioEvents;
 
 // flag to indicate if we are after receiving
 unsigned long iReceiveTimeOutTime = 0;
+
+// RX-silence diagnostics. The radio callbacks run in the LORA / timer task and only publish
+// a timestamp; the tracker itself, the chip reads and the prints stay in the loop task.
+static RxSilenceTracker g_rxs;
+static volatile uint32_t g_rxs_ev_ms = 0;      // time of the latest RX event (OnRxDone/OnRxError/header)
+static volatile uint32_t g_rxs_ev_seq = 0;     // bumped per event
+static volatile int16_t  g_rxs_ev_rssi = 0;    // of the latest OnRxDone
+static volatile int8_t   g_rxs_ev_snr = 0;
+static volatile bool     g_rxs_ev_has_q = false; // latest event was an OnRxDone (rssi/snr valid)
+static uint32_t g_rxs_cad_busy = 0, g_rxs_cad_scans = 0, g_rxs_restarts = 0;
+
+static void rxsNoteEvent(bool has_q, int16_t rssi, int8_t snr)
+{
+    g_rxs_ev_rssi = rssi;
+    g_rxs_ev_snr = snr;
+    g_rxs_ev_has_q = has_q;
+    g_rxs_ev_ms = millis();
+    g_rxs_ev_seq = g_rxs_ev_seq + 1;
+}
+static void rxsOnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr)
+{
+    rxsNoteEvent(true, rssi, snr);
+    OnRxDone(payload, size, rssi, snr);
+}
+static void rxsOnRxError(void)
+{
+    rxsNoteEvent(false, 0, 0);
+    OnRxError();
+}
+static void rxsOnHeaderDetect(void)
+{
+    rxsNoteEvent(false, 0, 0);
+    OnHeaderDetect();
+}
+
+// Boot counters for --info (read from command_functions.cpp, loop task): silences, longest s, total s.
+void rxSilenceGetStats(uint32_t *silences, uint32_t *longest_s, uint32_t *total_s)
+{
+    uint32_t now = millis();
+    *silences = g_rxs.silences;
+    *longest_s = g_rxs.longestNow(now);
+    *total_s = g_rxs.totalNow(now);
+}
 
 // CSMA/CA async CAD state
 std::atomic<bool> cad_done_flag{false};
@@ -411,6 +458,7 @@ void blinkLED2();                                    // blink RED
 #include "serial_command.h"
 // gatewayService_*() likewise (C4 carve-out)
 #include "gateway_service.h"
+#include "gw_reg_runtime.h"
 
 
 #if defined(ENABLE_RTC)
@@ -541,11 +589,20 @@ void nrf52setup()
 
      // LEDs
     #if not defined(BOARD_HELTEC_T114)
+        // LED-15: pinMode(OUTPUT) latches LOW, which lights an active-low LED: write the off level at once
         pinMode(LED_GREEN, OUTPUT);
+        digitalWrite(LED_GREEN, !LED_STATE_ON);
         #ifndef BOARD_RAK4630
         pinMode(LED_RED, OUTPUT);
+        digitalWrite(LED_RED, !LED_STATE_ON);
         #endif
         pinMode(LED_BLUE, OUTPUT);
+        digitalWrite(LED_BLUE, !LED_STATE_ON);
+    #endif
+    #if defined(BOARD_LED) && defined(BOARD_HELTEC_T114)
+        // T114 skips the block above; its BOARD_LED pad is set up here (LED-07/15)
+        pinMode(BOARD_LED, OUTPUT);
+        digitalWrite(BOARD_LED, boardLedLevel(false, BOARD_LED_ACTIVE_LOW));
     #endif
 
     //  Initialize the Serial Port for debug output
@@ -629,6 +686,7 @@ void nrf52setup()
     meshcom_settings.node_mversion = MODUL_HARDWARE;
     meshcom_settings.node_cleanflash = 0;
     snprintf(meshcom_settings.node_fwversion, sizeof(meshcom_settings.node_fwversion), "%-4.4s%-1.1s", SOURCE_VERSION, SOURCE_VERSION_SUB);
+    gwRegBoot();
 
 #if defined(ENABLE_MSGSTORE)
     // S3: store node -- glue first (installs the MsgStoreEnv), then the persisted
@@ -636,6 +694,13 @@ void nrf52setup()
     msgstoreGlueInit();
     msgstoreSettingsLoad();
 #endif
+
+    // BLK-01: call blocklist from flash/NVS (independent of ENABLE_MSGSTORE).
+    blockListLoad();
+
+    // RM-05 (#1189): remote-management state (high-water mark from its own flash file), after the
+    // settings load so node_call/node_passwd are final.
+    rmInit();
 
     // "-0" und "-01" sind nicht die kanonische Schreibweise der SSID. Was aus
     // dem Flash kommt, wird deshalb einmal beim Start geradegezogen -- das
@@ -708,6 +773,7 @@ void nrf52setup()
     bAnalogCheck = meshcom_settings.node_sset3 & 0x0008;
     bBMP3ON = meshcom_settings.node_sset3 & 0x0010;
     bAHT20ON = meshcom_settings.node_sset3 & 0x0020;
+    bUSER_BOARD_LED = meshcom_settings.node_sset3 & 0x0080;   // LED-07: --board led
 
     bDEBUGCSV = meshcom_settings.node_sset4 & 0x0001;
     bDEBUGEN = meshcom_settings.node_sset4 & 0x0002;
@@ -1007,7 +1073,7 @@ void nrf52setup()
 	{
 		// BLE is not activated, switch off blue LED
         #if not defined(BOARD_HELTEC_T114)
-		digitalWrite(LED_BLUE, LOW);
+		digitalWrite(LED_BLUE, !LED_STATE_ON);   // LED-15: off level, not LOW
         #endif
 	}
 
@@ -1017,7 +1083,7 @@ void nrf52setup()
 
 #ifdef ARDUINO_ARCH_RP2040
 	// RAK11310 does not have BLE, switch off blue LED
-	digitalWrite(LED_BLUE, LOW);
+	digitalWrite(LED_BLUE, !LED_STATE_ON);
 #endif
 
     // I2C init
@@ -1109,13 +1175,14 @@ void nrf52setup()
 
     //  Set the LoRa Callback Functions
     RadioEvents.TxDone = OnTxDone;
-    RadioEvents.RxDone = OnRxDone;
+    g_rxs.init(millis());
+    RadioEvents.RxDone = rxsOnRxDone;
     RadioEvents.TxTimeout = OnTxTimeout;
     RadioEvents.RxTimeout = OnRxTimeout;
-    RadioEvents.RxError = OnRxError;
+    RadioEvents.RxError = rxsOnRxError;
     RadioEvents.CadDone = OnCadDone;
     //RadioEvents.PreAmpDetect = OnPreambleDetect;
-    RadioEvents.PreAmpDetect = OnHeaderDetect;
+    RadioEvents.PreAmpDetect = rxsOnHeaderDetect;
 
     // 4.34w we use EU8 instead of EU
     if(meshcom_settings.node_country == 0)
@@ -1277,6 +1344,13 @@ void nrf52setup()
 void nrf52loop()
 {
     INSTR_LOOPTICK();
+
+    gwRegTick();
+
+    #if defined(REMOTE_LED_PIN)
+    remoteLedTick();   // RM "led flash" pattern (LED-07)
+    #endif
+    boardLedTick();    // --board led heartbeat; no-op without BOARD_LED
 
     // BP-01/BP-04: close a back-pressure episode with QRV once the TX ring
     // has drained, even when no further user message arrives to observe it.
@@ -1471,20 +1545,14 @@ void nrf52loop()
                 else if(ringBuffer[i][1] == 0x00) pending++;
                 else retrying++;
             }
-            int w = iWrite;
-            int r = iRead;
-            // BP-02: queued is now the honest occupied-slot count (the
+            // BP-02: queued is the honest occupied-slot count (the
             // pending/retrying/done buckets above already scan every slot
-            // and partition it exactly) instead of the raw index distance --
-            // that distance counted freed holes left behind by a
-            // priority-starved entry parked at iRead as still queued
-            // (DJ8MEH-RCA: queued=19 vs. 3-4 real). The old arithmetic
-            // survives as `dist` below for anyone comparing against
-            // pre-BP-02 logs.
+            // and partition it exactly). TXP W1b (slot pool): the iW=/iR=/
+            // dist= fields are gone with the indices; retrying includes
+            // INFLIGHT and parked SENT slots.
             int queued = pending + retrying + done;
-            int dist = (w >= r) ? (w - r) : (MAX_RING - r + w);
-            Serial.printf("[MC-DBG] RING_STATUS queued=%d pending=%d retrying=%d done=%d iW=%d iR=%d dist=%d\n",
-                queued, pending, retrying, done, w, r, dist);
+            Serial.printf("[MC-DBG] RING_STATUS queued=%d pending=%d retrying=%d done=%d\n",
+                queued, pending, retrying, done);
         }
     }
 
@@ -1509,6 +1577,10 @@ void nrf52loop()
         if(_pendText) sendDisplayText(_msg, _rssi, _snr);
         if(_pendPos)  sendDisplayPosition(_msg, _rssi, _snr);
     }
+
+    // RM-05 (#1189): authenticated remote-management DMs queued by OnRxDone (LORA task); crypto,
+    // execution, flash write and the reply all run here, in the loop task.
+    rmDrain();
 
     // Channel utilization report (every 10s). SL-05: the drain of the
     // ch_util accumulators feeds stat_util_rx_5m/tx_5m for the STAT line
@@ -1551,6 +1623,14 @@ void nrf52loop()
             struct setlogStatFields f;
             setlogFillStat(&f, nrf52_getFreeHeap());
 
+            // OR-STAT: OnRxDone time distribution (drains the window)
+            {
+                struct onrxStatsOut o;
+                onrxStatsSnapshotReset(&o, ONRXDONE_WARN_MS);
+                f.onrx_n = o.n; f.onrx_avg_ms = o.avg_ms; f.onrx_p95_ms = o.p95_ms;
+                f.onrx_p99_ms = o.p99_ms; f.onrx_max_ms = o.max_ms; f.onrx_warn = o.warn;
+            }
+
             // stat_drop_count[] increments happen under this same lock in
             // txring_functions.cpp -- clear under it too, right after the
             // (uncleared) read inside setlogFillStat().
@@ -1561,10 +1641,50 @@ void nrf52loop()
 
             if(bDisplayLog)
             {
-                char buf[300];
+                char buf[400];
                 setlogFormatStat(buf, sizeof(buf), &f);
                 setlogPrint(buf);
             }
+        }
+    }
+
+    // RX-silence tracker. Counters run always; prints and chip reads only under --loradebug.
+    {
+        static uint32_t rxs_seq_seen = 0;
+        uint32_t seq = g_rxs_ev_seq;
+        if(seq != rxs_seq_seen)
+        {
+            rxs_seq_seen = seq;
+            bool _hq = g_rxs_ev_has_q;
+            int16_t _rssi = g_rxs_ev_rssi;
+            int8_t _snr = g_rxs_ev_snr;
+            if(g_rxs.noteRx(g_rxs_ev_ms) && bLORADEBUG)
+            {
+                // Age of the last CAD / own TX / RX restart before the end ("-" = none since last RX)
+                char sc[12], st[12], sr[12];
+                rxSilenceFmtSince(sc, sizeof(sc), g_rxs.end_since_cad_ms);
+                rxSilenceFmtSince(st, sizeof(st), g_rxs.end_since_tx_ms);
+                rxSilenceFmtSince(sr, sizeof(sr), g_rxs.end_since_restart_ms);
+                if(_hq)
+                    Serial.printf("[MC-DBG] RX_SILENCE_END dur=%lu by=%s since_cad=%s since_tx=%s since_restart=%s rssi=%d snr=%d\n",
+                        (unsigned long)g_rxs.end_dur_s, rxSilenceReasonName(g_rxs.end_reason), sc, st, sr, (int)_rssi, (int)_snr);
+                else
+                    Serial.printf("[MC-DBG] RX_SILENCE_END dur=%lu by=%s since_cad=%s since_tx=%s since_restart=%s rssi=na snr=na\n",
+                        (unsigned long)g_rxs.end_dur_s, rxSilenceReasonName(g_rxs.end_reason), sc, st, sr);
+            }
+        }
+        uint32_t _rxs_t = 0;
+        if(g_rxs.tick(millis(), &_rxs_t) && bLORADEBUG)
+        {
+            RadioDiag d;
+            taskENTER_CRITICAL();
+            radioDiagRead(&d);   // read-only SPI commands, RX stays armed; loop task only
+            taskEXIT_CRITICAL();
+            Serial.printf("[MC-DBG] RX_SILENCE t=%lu mode=%s drv=%s st=0x%02X irq=0x%04X err=0x%04X rssi_inst=%d cad=%lu/%lu restarts=%lu boosted=%d\n",
+                (unsigned long)_rxs_t, radioChipModeName(d.chip_mode), radioDrvModeName(d.drv_mode),
+                d.status, d.irq, d.err, (int)d.rssi_inst,
+                (unsigned long)g_rxs_cad_busy, (unsigned long)g_rxs_cad_scans,
+                (unsigned long)g_rxs_restarts, bBOOSTEDGAIN ? 1 : 0);
         }
     }
 
@@ -1592,24 +1712,49 @@ void nrf52loop()
                     Serial.printf("[MC-DBG] RX_IRQ_STALE forced restart after %d deferrals\n", rx_irq_defer_count);
                 rx_irq_defer_count = 0;
                 iReceiveTimeOutTime = 0;
+                RadioDiag _rxs_before = {};
                 taskENTER_CRITICAL();
+                // Chip mode before the restart (read-only), only for the loradebug line below
+                if(bLORADEBUG) radioDiagRead(&_rxs_before);
                 startRadioReceive();
+                // RX-DEAF-02: startRadioReceive() aborted any reception, so a header latched by OnHeaderDetect()
+                // without a following OnRxDone/OnRxError/OnRxTimeout must not keep the TX gate shut. Cleared
+                // inside the critical section: a header callback cannot slip in between restart and clear.
+                {
+                    unsigned long _rx_s = ch_util_rx_start.exchange(0);
+                    if(_rx_s > 0)
+                        ch_util_rx_accum.fetch_add(millis() - _rx_s);
+                }
+                is_receiving = false;
                 taskEXIT_CRITICAL();
                 if(bLORADEBUG)
                 {
                     Serial.printf("[MC-SM] IDLE -> RX_LISTEN rc=0\n");
-                    Serial.printf("[MC-DBG] RX_RESTART src=timeout\n");
+                    Serial.printf("[MC-DBG] RX_RESTART src=timeout mode_before=%s\n",
+                        radioChipModeName(_rxs_before.chip_mode));
                 }
+                g_rxs_restarts++;
+                g_rxs.noteAction(RXS_BY_WATCHDOG, millis());
             }
         }
+    }
+    else if(iReceiveTimeOutTime == 0 && is_receiving && tx_is_active == false)
+    {
+        // RX-DEAF-02: latch without an armed timer; arm it so the branch above (3 deferrals protect a real
+        // reception) eventually restarts RX and clears the flag.
+        iReceiveTimeOutTime = millis();
     }
 
     if(iReceiveTimeOutTime == 0 && is_receiving == false && tx_is_active == false)
     {
         INSTR_SECTION("lora_sm");
-        int _w = iWrite;
-        int _r = iRead;
-        if (_w != _r)
+        // TXP W1b: "something sendable in the TX pool" (was iWrite != iRead); not
+        // txRingDepth() > 0: a parked own text waiting for its ACK is not sendable.
+        // A CAD already running or finished must still be consumed here (the
+        // CAD is async over several passes; the sendable slot may vanish in
+        // between, e.g. TTL sweep or ACK): otherwise a stale "channel free"
+        // result would be reused for the next frame without a fresh CAD.
+        if (getNextTxSlot() >= 0 || cad_in_progress || cad_done_flag)
         {
             // RACE-05 fix: snapshot CAD flags under critical section,
             // then act on snapshot values outside the lock
@@ -1643,6 +1788,7 @@ void nrf52loop()
                 Radio.Standby();
                 Radio.StartCad();
                 taskEXIT_CRITICAL();
+                g_rxs.noteAction(RXS_BY_CAD, millis());
             }
             else if(_cad_df)
             {
@@ -1650,6 +1796,8 @@ void nrf52loop()
                 cad_in_progress = false;
                 cad_done_flag = false;
                 taskEXIT_CRITICAL();
+                g_rxs_cad_scans++;
+                if(_cad_cb) g_rxs_cad_busy++;
                 if(bLORADEBUG)
                     Serial.printf("[MC-DBG] CAD_SCAN result=%d\n", _cad_cb ? -702 : 0);
 
@@ -1670,11 +1818,13 @@ void nrf52loop()
                     if(bLORADEBUG)
                         Serial.printf("[MC-DBG] CAD_FREE attempt=%d\n", cad_attempt);
 
+                    tx_cad_attempt = cad_attempt; // honest cad= in the TX log (csma_reset zeroes it)
                     csma_reset();
                     bool _tx_ok;
                     { INSTR_SECTION("lora_tx"); _tx_ok = doTX(); }
                     if(_tx_ok)
                     {
+                        g_rxs.noteAction(RXS_BY_TX, millis());
                         ch_util_tx_start = millis();
                         if(bLORADEBUG)
                         {
@@ -1712,12 +1862,13 @@ void nrf52loop()
                     Radio.Standby();
                     Radio.StartCad();
                     taskEXIT_CRITICAL();
+                    g_rxs.noteAction(RXS_BY_CAD, millis());
                 }
                 else
                 {
                     // Double-check confirmed busy — backoff
                     cad_attempt++;
-                    csma_timeout = csma_compute_timeout(cad_attempt);
+                    csma_timeout = csma_compute_timeout_nofloor(cad_attempt); // CAD_BUSY: no age floor
 
                     if(bLORADEBUG)
                     {
@@ -2220,7 +2371,7 @@ void nrf52loop()
     if(akt_timer < 5 || akt_timer > 120)
     {
         INSTR_SECTION("akt_timer");
-        akt_timer = TELEMETRY_INTERVAL;
+        akt_timer = 15;   // default 15 minutes (TELEMETRY_INTERVAL is 30*60 and read as minutes = 30 h)
     }
     
     akt_timer = akt_timer * 1000 * 60; // in minutes
@@ -2675,7 +2826,8 @@ void nrf52loop()
 
                 // Fehlschlag außerhalb von bDisplayInfo sichtbar machen, sonst verstummt
                 // der Knoten für jeden, der mit Info aus läuft, ohne jede Meldung.
-                if(pingResult != PING_QUEUED)
+                // PING_INVALID_TARGET logs its own notice in sendPing().
+                if(pingResult != PING_QUEUED && pingResult != PING_INVALID_TARGET)
                     printfdeb("[PING]...FAILED Ping to %s\n", meshcom_settings.node_pingcall);
             }
         }
@@ -2697,18 +2849,18 @@ void nrf52loop()
 void blinkLED()
 {
     #if not defined(BOARD_HELTEC_T114)
-    digitalWrite(LED_GREEN, HIGH);
+    digitalWrite(LED_GREEN, LED_STATE_ON);
     delay(20);
-    digitalWrite(LED_GREEN, LOW);
+    digitalWrite(LED_GREEN, !LED_STATE_ON);
     #endif
 }
 
 void blinkLED2()
 {
     #if not defined(BOARD_HELTEC_T114)
-    digitalWrite(LED_BLUE, HIGH);
+    digitalWrite(LED_BLUE, LED_STATE_ON);
     delay(20);
-    digitalWrite(LED_BLUE, LOW);
+    digitalWrite(LED_BLUE, !LED_STATE_ON);
     #endif
 }
 
@@ -3010,5 +3162,6 @@ void sendHeartbeat()
         return;
 
     sendKEEP();
+    storTick();   // SNF-GW W3 (no-op unless --stor on and gateway)
 
 }

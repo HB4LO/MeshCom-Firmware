@@ -13,8 +13,8 @@ const GwServer GW_SERVERS[] = {
     { "OE", "MeshCom OE (Austria/WW)",
       { /*INET*/   { GWM_DIRECT, "", { "meshcom.oevsv.at", {89, 185, 97, 38} }, GW_NTP_POOL },
         /*HAMNET*/ { GWM_DIRECT, "", { nullptr, {44, 143, 8, 143} }, { nullptr, {44, 143, 0, 9} } } } },
-    // DL: Internet server by wish of the German sysadmin. Hamnet users select HC;
-    // DL on the Hamnet is served via HC.
+    // DL: Internet server by wish of the German sysadmin (relayed by Kurt,
+    // 2026-10-15). Hamnet users select HC.
     { "DL", "MeshCom DL (Germany)",
       { /*INET*/   { GWM_DIRECT, "", { "meshcom.hamnet.network", {192, 68, 17, 26} }, GW_NTP_POOL },
         /*HAMNET*/ { GWM_VIA, "HC", { nullptr, {0, 0, 0, 0} }, { nullptr, {0, 0, 0, 0} } } } },
@@ -28,7 +28,7 @@ const GwServer GW_SERVERS[] = {
       { /*INET*/   { GWM_DIRECT, "", { "meshcom.emcomm.ch", {157, 143, 4, 44} }, GW_NTP_POOL },
         /*HAMNET*/ { GWM_DIRECT, "", { nullptr, {44, 142, 42, 59} }, { nullptr, {44, 142, 163, 2} } } } },
     { "SP", "MeshCom SP (Poland)",
-      { /*INET*/   { GWM_DIRECT, "", { "spmeshcom.dynalias.com", {146, 59, 232, 234} }, GW_NTP_POOL },
+      { /*INET*/   { GWM_DIRECT, "", { "sp.meshcom.pl", {146, 59, 232, 234} }, GW_NTP_POOL },
         /*HAMNET*/ { GWM_OTHER_NET, "", { nullptr, {0, 0, 0, 0} }, { nullptr, {0, 0, 0, 0} } } } },
     // FR and US: not enabled, no server addresses are known. To enable a row:
     // operator's server (host and/or IP), a reachable time server, and whether
