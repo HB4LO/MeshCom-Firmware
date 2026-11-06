@@ -3,6 +3,7 @@
  *  @date        2025-12-03
  */
 #include "mc_text.h"
+#include "msg_body.h"      // CHARS-01: strip only the trailing {NNN ACK marker
 #include "uptime_min.h"   // wrap-safe 16-bit uptime minutes (NBR stamps)
 #include <Arduino.h>
 
@@ -3733,6 +3734,10 @@ void sub_page_setup()
     #ifdef OneWire_GPIO
     _create_setup_textinput_element("owgpio", "1-Wire GPIO", String(meshcom_settings.node_owgpio), "36", "onewiregpio", 3, false, false); // create Textinput-Element including Label and Button
     #endif
+    #if defined(ENABLE_WIND)
+    _create_setup_textinput_element("windpin", "Anemometer GPIO", String(meshcom_settings.node_wind_pin), "0", "windpin", 2, false, false);
+    _create_setup_textinput_element("windcal", "Anemometer km/h per Hz", String(meshcom_settings.node_wind_cal, 2), "2.4", "windcal", 6, false, false);
+    #endif
 
     web_client.println("</div><div class=\"grid grid2\">");
 
@@ -3790,6 +3795,12 @@ void sub_page_setup()
     #endif
     #if defined(ENABLE_AHT20)
     _create_setup_switch_element("aht20", "AHT20", "enable AHT20 sensor", bAHT20ON);                       // create Switch-Element inclucing Label and Description
+    #endif
+    #if defined(ENABLE_LTR390)
+    _create_setup_switch_element("uv", "UV (LTR390)", "enable LTR390 UV sensor", bUVON);
+    #endif
+    #if defined(ENABLE_WIND)
+    _create_setup_switch_element("wind", "Anemometer", "enable anemometer (reed contact)", bWINDON);
     #endif
     #if defined(ENABLE_SHT21)
     _create_setup_switch_element("sht21", "SHT21", "enable SHT21 sensor", bSHT21ON);                       // create Switch-Element inclucing Label and Description
@@ -3970,8 +3981,8 @@ void sub_content_messages()
                     if (bDEBUG)
                         Serial.printf("aprsmsg.msg_source_call:%s, aprsmsg.msg_gateway_call:%s, aprsmsg.msg_destination_call:%s, aprsmsg.msg_payload:%s\n", aprsmsg.msg_source_call, aprsmsg.msg_source_last, aprsmsg.msg_destination_call, aprsmsg.msg_payload);
 
-                    if (msgtxt.indexOf('{') > 0)
-                        msgtxt = String(aprsmsg.msg_payload).substring(0, msgtxt.indexOf('{'));
+                    // strip only the trailing "{NNN" ACK marker; a '{' inside the text stays (msg_body.h)
+                    msgtxt = msgtxt.substring(0, msg_body_visible_len(msgtxt.c_str(), msgtxt.length()));
 
                     // WEB-03a: mesh-derived strings (payload, path, callsigns) are attacker-controlled -- escape before HTML output
                     String msgtxt_esc = htmlEscape(msgtxt);
@@ -4209,12 +4220,17 @@ void sub_page_info()
     // BAT-01: global_batt==0.0 is the established "no reading" convention (grounded pin, or
     // the ADC-path no-battery detection in batt_functions.cpp) -- same check the on-device
     // displays already use, see loop_functions.cpp.
-    if (global_batt == 0.0) {
-        web_client.print("<tr><td>Battery</td><td>USB (no battery)</td></tr>\n");
-    } else {
-        web_client.printf("<tr><td>Battery</td><td>%.3fV (%d%%) max %.3fV", global_batt / 1000.0, global_proz, meshcom_settings.node_maxv);
-        #if defined(XPOWERS_CHIP_AXP192) || defined(XPOWERS_CHIP_AXP2101)
-        #endif
+    {   // BAT-04: charge state appended inside the same cell; BCS_UNKNOWN leaves the HTML unchanged
+        const BattChargeInfo bci = global_batt_charge;
+        char bcsText[40];
+        bcsText[0] = '\0';
+        if (bci.state != BCS_UNKNOWN) battChargeFormat(bcsText, sizeof(bcsText), bci);
+        if (global_batt == 0.0) {
+            web_client.print("<tr><td>Battery</td><td>USB (no battery)");
+        } else {
+            web_client.printf("<tr><td>Battery</td><td>%.3fV (%d%%) max %.3fV", global_batt / 1000.0, global_proz, meshcom_settings.node_maxv);
+        }
+        if (bcsText[0]) web_client.printf(", %s", bcsText);
         web_client.print("</td></tr>\n");
     }
 #if defined(ESP32)
@@ -4306,6 +4322,34 @@ void sub_page_info()
     #endif
     #if defined(ENABLE_AHT20)
     web_client.printf("AHT20: %s<br>", (bAHT20ON ? "on" : "off"));
+    #endif
+    #if defined(ENABLE_LTR390)
+    {
+        float fuv = 0.0f;
+        if(bUVON)
+        {
+            if(wxMeanGet(&wx_uv_mean, &fuv))
+                web_client.printf("UV (LTR390): on (%s), UVI %.1f, mean %.1f (n=%lu)<br>", (ltr390_found ? "found" : "error"), wx_uv_last, fuv, (unsigned long)wxMeanCount(&wx_uv_mean));
+            else
+                web_client.printf("UV (LTR390): on (%s), UVI %.1f, mean - (n=0)<br>", (ltr390_found ? "found" : "error"), wx_uv_last);
+        }
+        else
+            web_client.printf("UV (LTR390): off<br>");
+    }
+    #endif
+    #if defined(ENABLE_WIND)
+    {
+        float fwm = 0.0f, fwg = 0.0f;
+        if(bWINDON)
+        {
+            char swm[12] = "-", swg[12] = "-";
+            if(wxMeanGet(&wx_wind_mean, &fwm)) snprintf(swm, sizeof(swm), "%.1f", fwm);
+            if(wxGustGet(&wx_wind_gust, &fwg)) snprintf(swg, sizeof(swg), "%.1f", fwg);
+            web_client.printf("Anemometer: on (pin %i), %.1f km/h, mean %s, gust %s<br>", meshcom_settings.node_wind_pin, wx_wind_last_kmh, swm, swg);
+        }
+        else
+            web_client.printf("Anemometer: off<br>");
+    }
     #endif
     #if defined(ENABLE_SHT21)
     web_client.printf("SHT21: %s<br>", (bSHT21ON ? "on" : "off"));
